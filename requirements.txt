@@ -1,0 +1,34 @@
+# Core framework
+fastapi==0.104.1
+uvicorn==0.24.0
+
+# AI/LLM stack
+langchain==0.1.0
+langgraph==0.0.26
+langchain-openai==0.0.5
+langchain-core==0.1.0
+openai==1.6.1
+
+# Voice and communication
+twilio==8.10.0
+
+# Payment processing
+stripe==7.8.0
+
+# Database and caching
+redis==5.0.1
+sqlalchemy==2.0.23
+
+# Networking and HTTP
+requests==2.31.0
+websockets==12.0
+
+# Configuration and environment
+python-dotenv==1.0.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Additional utilities for production
+alembic==1.13.0
+pytest==7.4.3
+pytest-asyncio==0.21.1

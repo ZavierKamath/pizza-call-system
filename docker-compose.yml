@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # Redis service for session management and caching
+  redis:
+    image: redis:7-alpine
+    container_name: pizza_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Main Pizza Agent application
+  pizza-agent:
+    build: .
+    container_name: pizza_agent_app
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite:///./data/pizza_orders.db
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend dashboard (optional for development)
+  dashboard:
+    build: ./frontend
+    container_name: pizza_dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    depends_on:
+      - pizza-agent
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+    driver: local
