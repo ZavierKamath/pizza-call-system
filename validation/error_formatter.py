@@ -21,11 +21,11 @@ class ValidationErrorFormatter:
         """Initialize error formatter with user-friendly message templates."""
         # Address validation error messages
         self.address_error_messages = {
-            "incomplete": "We need a complete address to deliver your pizza. Please include street address, city, and state.",
+            "incomplete": "We need your street address to deliver your pizza.",
             "not_found": "We couldn't find that address. Please double-check the spelling and try again.",
             "outside_delivery": "Sorry, that address is outside our delivery area. We deliver within 5 miles of our restaurant.",
             "geocoding_failed": "We're having trouble verifying that address right now. Please try again or call us directly.",
-            "format_error": "Please provide your address in this format: '123 Main St, City, State ZIP'"
+            "format_error": "Please provide your street address like: '123 Main Street'"
         }
         
         # Order validation error messages  
@@ -53,9 +53,9 @@ class ValidationErrorFormatter:
         # Suggestion templates
         self.suggestion_templates = {
             "address": [
-                "Try including your ZIP code",
                 "Make sure the street name is spelled correctly", 
                 "Double-check the house/apartment number",
+                "Include the street number and name",
                 "Use full street names (Street instead of St)"
             ],
             "order": [
@@ -226,7 +226,7 @@ class ValidationErrorFormatter:
         
         # Return most relevant suggestion based on field type
         if field == "address":
-            return "Please try entering your full address including ZIP code."
+            return "Please try entering your street address with number and name."
         elif field in ["order", "pizzas"]:
             return "What pizza would you like to add to your order?"
         elif field in ["payment", "payment_method"]:

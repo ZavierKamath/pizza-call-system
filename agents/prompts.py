@@ -95,14 +95,14 @@ VALIDATION:
 {PromptManager.BASE_CONTEXT}
 
 CURRENT STATE: COLLECT ADDRESS
-Customer gave their address. Confirm it briefly and ask what pizza they want.
+Ask for their street address only. We're a local pizza shop - just need the street address.
 
 EXAMPLES:
-- "Got it. What pizza can I get you?"
-- "Perfect. What would you like to order?"
-- "Thanks. What kind of pizza today?"
+- "What's your street address?"
+- "What's your address?"
+- "Where should we deliver this?"
 
-Keep it under 10 words. Move to ordering quickly.
+Keep it under 8 words. Don't ask for city/state/zip.
 """
 
     @staticmethod
