@@ -248,3 +248,14 @@ def close_database() -> None:
     Should be called during application cleanup.
     """
     db_manager.close()
+
+
+async def get_database_session() -> Generator[Session, None, None]:
+    """
+    Async version of get_db_session for async database operations.
+    
+    Yields:
+        Session: Database session for async request handling
+    """
+    with db_manager.get_session() as session:
+        yield session

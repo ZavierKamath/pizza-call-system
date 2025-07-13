@@ -106,6 +106,29 @@ class Settings(BaseSettings):
         ge=1, le=480
     )
     
+    # Dashboard API settings
+    dashboard_api_key: Optional[str] = Field(
+        None, 
+        description="API key for dashboard authentication"
+    )
+    
+    # JWT token settings
+    jwt_secret_key: Optional[str] = Field(
+        None, 
+        description="JWT secret key for token signing"
+    )
+    
+    jwt_algorithm: str = Field(
+        default="HS256",
+        description="JWT signing algorithm"
+    )
+    
+    jwt_expiry_hours: int = Field(
+        default=24,
+        description="JWT token expiry in hours",
+        ge=1, le=168
+    )
+    
     # =============================================================================
     # LOGGING CONFIGURATION
     # =============================================================================

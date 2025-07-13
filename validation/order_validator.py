@@ -1,11 +1,18 @@
 """
-Order validation for pizza orders.
-Validates pizza configurations, quantities, and pricing.
+Order validation for pizza orders with dynamic menu management.
+Validates pizza configurations, quantities, pricing, and menu availability.
 """
 
 import logging
-from typing import Dict, Any, List, Optional
+import json
+import asyncio
+from typing import Dict, Any, List, Optional, Set
 from decimal import Decimal, ROUND_HALF_UP
+from datetime import datetime, timedelta
+
+from ..config.settings import settings
+from ..database.redis_client import get_redis_async
+from ..agents.states import StateManager
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -15,58 +22,110 @@ class OrderValidator:
     """
     Validates pizza orders including configurations, pricing, and business rules.
     
-    Ensures orders meet menu requirements and business constraints.
+    Features dynamic menu loading, availability checking, and real-time price calculation.
+    Integrates with business constraints and promotional pricing.
     """
     
     def __init__(self):
         """Initialize order validator with menu and business rules."""
-        # Menu configuration (would be loaded from database in real system)
-        self.menu = {
-            "sizes": {
-                "small": {"price": 12.99, "name": "Small (10\")", "max_toppings": 5},
-                "medium": {"price": 15.99, "name": "Medium (12\")", "max_toppings": 7},
-                "large": {"price": 18.99, "name": "Large (14\")", "max_toppings": 10}
-            },
-            "toppings": {
-                "pepperoni": 2.00,
-                "mushrooms": 1.50,
-                "sausage": 2.00,
-                "peppers": 1.50,
-                "onions": 1.00,
-                "extra_cheese": 2.50,
-                "olives": 1.50,
-                "ham": 2.00,
-                "pineapple": 1.50,
-                "anchovies": 2.00
-            },
-            "crusts": {
-                "thin": {"price": 0.00, "name": "Thin Crust"},
-                "thick": {"price": 0.00, "name": "Thick Crust"},
-                "stuffed": {"price": 2.00, "name": "Stuffed Crust"}
-            }
-        }
-        
-        # Business rules
-        self.max_pizzas_per_order = 10
+        # Business rules from settings
+        self.max_pizzas_per_order = settings.max_pizzas_per_order  # 10 from settings
         self.max_quantity_per_pizza = 5
         self.minimum_order_total = 15.00
         self.tax_rate = 0.085  # 8.5%
         self.delivery_fee = 2.99
         
-        logger.info("OrderValidator initialized")
+        # Menu cache configuration
+        self.menu_cache_ttl_minutes = 30
+        self._cached_menu = None
+        self._menu_cache_time = None
+        
+        # Default menu structure (fallback when dynamic loading fails)
+        self.default_menu = {
+            "sizes": {
+                "small": {
+                    "price": 12.99, 
+                    "name": "Small (10\")", 
+                    "max_toppings": 5,
+                    "available": True,
+                    "description": "Perfect for 1-2 people"
+                },
+                "medium": {
+                    "price": 15.99, 
+                    "name": "Medium (12\")", 
+                    "max_toppings": 7,
+                    "available": True,
+                    "description": "Great for 2-3 people"
+                },
+                "large": {
+                    "price": 18.99, 
+                    "name": "Large (14\")", 
+                    "max_toppings": 10,
+                    "available": True,
+                    "description": "Feeds 3-4 people"
+                }
+            },
+            "toppings": {
+                "pepperoni": {"price": 2.00, "available": True, "vegetarian": False, "category": "meat"},
+                "mushrooms": {"price": 1.50, "available": True, "vegetarian": True, "category": "vegetable"},
+                "sausage": {"price": 2.00, "available": True, "vegetarian": False, "category": "meat"},
+                "peppers": {"price": 1.50, "available": True, "vegetarian": True, "category": "vegetable"},
+                "onions": {"price": 1.00, "available": True, "vegetarian": True, "category": "vegetable"},
+                "extra_cheese": {"price": 2.50, "available": True, "vegetarian": True, "category": "cheese"},
+                "olives": {"price": 1.50, "available": True, "vegetarian": True, "category": "vegetable"},
+                "ham": {"price": 2.00, "available": True, "vegetarian": False, "category": "meat"},
+                "pineapple": {"price": 1.50, "available": True, "vegetarian": True, "category": "fruit"},
+                "anchovies": {"price": 2.00, "available": True, "vegetarian": False, "category": "seafood"},
+                "bacon": {"price": 2.50, "available": True, "vegetarian": False, "category": "meat"},
+                "chicken": {"price": 2.25, "available": True, "vegetarian": False, "category": "meat"},
+                "spinach": {"price": 1.25, "available": True, "vegetarian": True, "category": "vegetable"},
+                "tomatoes": {"price": 1.00, "available": True, "vegetarian": True, "category": "vegetable"},
+                "jalapeños": {"price": 1.25, "available": True, "vegetarian": True, "category": "vegetable"}
+            },
+            "crusts": {
+                "thin": {"price": 0.00, "name": "Thin Crust", "available": True, "description": "Light and crispy"},
+                "thick": {"price": 0.00, "name": "Thick Crust", "available": True, "description": "Traditional thick crust"},
+                "stuffed": {"price": 2.00, "name": "Stuffed Crust", "available": True, "description": "Cheese-stuffed crust"},
+                "gluten_free": {"price": 3.00, "name": "Gluten Free", "available": True, "description": "Gluten-free alternative"}
+            },
+            "specials": [
+                {
+                    "id": "pepperoni_special",
+                    "name": "Pepperoni Special",
+                    "description": "Large pepperoni pizza with extra cheese",
+                    "price": 19.99,
+                    "original_price": 22.49,
+                    "available": True,
+                    "valid_until": "2024-12-31",
+                    "pizza": {
+                        "size": "large",
+                        "crust": "thin",
+                        "toppings": ["pepperoni", "extra_cheese"]
+                    }
+                }
+            ]
+        }
+        
+        # Unavailable items (simulating temporary outages)
+        self.temporarily_unavailable = set()
+        
+        logger.info(f"OrderValidator initialized with max {self.max_pizzas_per_order} pizzas per order")
     
-    def validate_order(self, order_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def validate_order(self, order_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Comprehensive order validation.
+        Comprehensive order validation with menu availability checking.
         
         Args:
             order_data (dict): Complete order information
             
         Returns:
-            dict: Validation result with details
+            dict: Validation result with details and calculated pricing
         """
         try:
             logger.debug(f"Validating order: {order_data}")
+            
+            # Load current menu
+            menu = await self.get_current_menu()
             
             pizzas = order_data.get("pizzas", [])
             
@@ -76,7 +135,8 @@ class OrderValidator:
                     "errors": ["Order must contain at least one pizza"],
                     "warnings": [],
                     "validated_order": {},
-                    "calculated_total": 0.0
+                    "calculated_total": 0.0,
+                    "menu_suggestions": await self._get_popular_suggestions()
                 }
             
             # Validate each pizza
@@ -85,7 +145,7 @@ class OrderValidator:
             all_warnings = []
             
             for i, pizza in enumerate(pizzas):
-                pizza_validation = self.validate_pizza(pizza, position=i+1)
+                pizza_validation = await self.validate_pizza(pizza, menu, position=i+1)
                 
                 if pizza_validation["is_valid"]:
                     validated_pizzas.append(pizza_validation["validated_pizza"])
@@ -95,7 +155,7 @@ class OrderValidator:
                 all_warnings.extend(pizza_validation.get("warnings", []))
             
             # Validate order-level constraints
-            order_validation = self._validate_order_constraints(validated_pizzas)
+            order_validation = await self._validate_order_constraints(validated_pizzas)
             all_errors.extend(order_validation.get("errors", []))
             all_warnings.extend(order_validation.get("warnings", []))
             
@@ -104,7 +164,15 @@ class OrderValidator:
             
             # Check minimum order requirement
             if calculated_totals["subtotal"] < self.minimum_order_total:
-                all_errors.append(f"Order must be at least ${self.minimum_order_total:.2f} (current: ${calculated_totals['subtotal']:.2f})")
+                all_errors.append(
+                    f"Order must be at least ${self.minimum_order_total:.2f} "
+                    f"(current: ${calculated_totals['subtotal']:.2f})"
+                )
+            
+            # Check for available promotions
+            promotion_info = await self._check_applicable_promotions(validated_pizzas, calculated_totals)
+            if promotion_info["applicable_promotions"]:
+                all_warnings.extend(promotion_info["suggestions"])
             
             # Compile result
             result = {
@@ -113,9 +181,14 @@ class OrderValidator:
                 "warnings": all_warnings,
                 "validated_order": {
                     "pizzas": validated_pizzas,
-                    "totals": calculated_totals
+                    "totals": calculated_totals,
+                    "promotions": promotion_info["applicable_promotions"]
                 },
-                "calculated_total": calculated_totals["total"]
+                "calculated_total": calculated_totals["total"],
+                "menu_info": {
+                    "unavailable_items": list(self.temporarily_unavailable),
+                    "special_offers": menu.get("specials", [])
+                }
             }
             
             if result["is_valid"]:
@@ -135,12 +208,13 @@ class OrderValidator:
                 "calculated_total": 0.0
             }
     
-    def validate_pizza(self, pizza_data: Dict[str, Any], position: int = 1) -> Dict[str, Any]:
+    async def validate_pizza(self, pizza_data: Dict[str, Any], menu: Dict[str, Any], position: int = 1) -> Dict[str, Any]:
         """
-        Validate individual pizza configuration.
+        Validate individual pizza configuration against current menu.
         
         Args:
             pizza_data (dict): Pizza configuration
+            menu (dict): Current menu data
             position (int): Pizza position in order (for error messages)
             
         Returns:
@@ -153,42 +227,62 @@ class OrderValidator:
             
             # Validate size
             size = pizza_data.get("size", "").lower()
-            if size not in self.menu["sizes"]:
-                errors.append(f"Pizza {position}: Invalid size '{size}'. Available: {', '.join(self.menu['sizes'].keys())}")
+            if size not in menu["sizes"]:
+                available_sizes = [s for s, info in menu["sizes"].items() if info.get("available", True)]
+                errors.append(f"Pizza {position}: Invalid size '{size}'. Available: {', '.join(available_sizes)}")
+            elif not menu["sizes"][size].get("available", True):
+                errors.append(f"Pizza {position}: Size '{size}' is currently unavailable")
             else:
                 validated_pizza["size"] = size
-                validated_pizza["size_info"] = self.menu["sizes"][size]
+                validated_pizza["size_info"] = menu["sizes"][size]
             
             # Validate crust
             crust = pizza_data.get("crust", "thin").lower()
-            if crust not in self.menu["crusts"]:
+            if crust not in menu["crusts"]:
+                available_crusts = [c for c, info in menu["crusts"].items() if info.get("available", True)]
                 warnings.append(f"Pizza {position}: Invalid crust '{crust}', defaulting to thin crust")
                 crust = "thin"
-            validated_pizza["crust"] = crust
-            validated_pizza["crust_info"] = self.menu["crusts"][crust]
+            elif not menu["crusts"][crust].get("available", True):
+                warnings.append(f"Pizza {position}: Crust '{crust}' unavailable, using thin crust")
+                crust = "thin"
             
-            # Validate toppings
+            validated_pizza["crust"] = crust
+            validated_pizza["crust_info"] = menu["crusts"][crust]
+            
+            # Validate toppings with availability checking
             toppings = pizza_data.get("toppings", [])
             validated_toppings = []
             invalid_toppings = []
+            unavailable_toppings = []
             
             for topping in toppings:
                 topping_clean = topping.lower().replace(" ", "_")
-                if topping_clean in self.menu["toppings"]:
-                    validated_toppings.append(topping_clean)
-                else:
+                
+                if topping_clean not in menu["toppings"]:
                     invalid_toppings.append(topping)
+                elif not menu["toppings"][topping_clean].get("available", True):
+                    unavailable_toppings.append(topping)
+                elif topping_clean in self.temporarily_unavailable:
+                    unavailable_toppings.append(topping)
+                else:
+                    validated_toppings.append(topping_clean)
             
             if invalid_toppings:
                 warnings.append(f"Pizza {position}: Unknown toppings ignored: {', '.join(invalid_toppings)}")
             
+            if unavailable_toppings:
+                warnings.append(f"Pizza {position}: Unavailable toppings removed: {', '.join(unavailable_toppings)}")
+            
             # Check topping limits
-            if size in self.menu["sizes"]:
-                max_toppings = self.menu["sizes"][size]["max_toppings"]
+            if size in menu["sizes"]:
+                max_toppings = menu["sizes"][size].get("max_toppings", 10)
                 if len(validated_toppings) > max_toppings:
-                    errors.append(f"Pizza {position}: Too many toppings. {size} pizzas can have max {max_toppings} toppings")
+                    errors.append(f"Pizza {position}: Too many toppings. {size} pizzas can have max {max_toppings} toppings (you have {len(validated_toppings)})")
             
             validated_pizza["toppings"] = validated_toppings
+            validated_pizza["topping_info"] = {
+                topping: menu["toppings"][topping] for topping in validated_toppings
+            }
             
             # Validate quantity
             quantity = pizza_data.get("quantity", 1)
@@ -205,7 +299,7 @@ class OrderValidator:
             
             # Calculate pizza price
             if "size" in validated_pizza and "quantity" in validated_pizza:
-                pizza_price = self._calculate_pizza_price(validated_pizza)
+                pizza_price = self._calculate_pizza_price(validated_pizza, menu)
                 validated_pizza["unit_price"] = pizza_price
                 validated_pizza["total_price"] = pizza_price * validated_pizza["quantity"]
             
@@ -215,6 +309,9 @@ class OrderValidator:
                 validated_pizza["special_instructions"] = special_instructions[:200]  # Limit length
                 if len(special_instructions) > 200:
                     warnings.append(f"Pizza {position}: Special instructions truncated to 200 characters")
+            
+            # Add dietary information
+            validated_pizza["dietary_info"] = self._calculate_dietary_info(validated_toppings, menu)
             
             return {
                 "is_valid": len(errors) == 0,
@@ -232,7 +329,197 @@ class OrderValidator:
                 "validated_pizza": {}
             }
     
-    def _validate_order_constraints(self, pizzas: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def check_menu_availability(self) -> Dict[str, Any]:
+        """
+        Check current menu availability and return status.
+        
+        Returns:
+            dict: Menu availability status
+        """
+        try:
+            menu = await self.get_current_menu()
+            
+            unavailable_items = {
+                "sizes": [size for size, info in menu["sizes"].items() if not info.get("available", True)],
+                "crusts": [crust for crust, info in menu["crusts"].items() if not info.get("available", True)],
+                "toppings": [topping for topping, info in menu["toppings"].items() if not info.get("available", True)]
+            }
+            
+            return {
+                "menu_available": True,
+                "unavailable_items": unavailable_items,
+                "temporarily_unavailable": list(self.temporarily_unavailable),
+                "last_updated": datetime.utcnow().isoformat(),
+                "special_offers": len(menu.get("specials", []))
+            }
+            
+        except Exception as e:
+            logger.error(f"Error checking menu availability: {e}")
+            return {
+                "menu_available": False,
+                "error": str(e),
+                "unavailable_items": {},
+                "temporarily_unavailable": []
+            }
+    
+    async def get_current_menu(self) -> Dict[str, Any]:
+        """
+        Get current menu with caching and real-time availability.
+        
+        Returns:
+            dict: Current menu data
+        """
+        try:
+            # Check cache first
+            if self._cached_menu and self._menu_cache_time:
+                cache_age = datetime.utcnow() - self._menu_cache_time
+                if cache_age < timedelta(minutes=self.menu_cache_ttl_minutes):
+                    return self._cached_menu
+            
+            # Try to load from Redis (dynamic menu updates)
+            menu = await self._load_menu_from_redis()
+            if menu:
+                self._cached_menu = menu
+                self._menu_cache_time = datetime.utcnow()
+                return menu
+            
+            # Fallback to default menu
+            logger.info("Using default menu (dynamic menu not available)")
+            self._cached_menu = self.default_menu.copy()
+            self._menu_cache_time = datetime.utcnow()
+            
+            return self._cached_menu
+            
+        except Exception as e:
+            logger.error(f"Error loading menu: {e}")
+            return self.default_menu.copy()
+    
+    async def update_item_availability(self, item_type: str, item_name: str, available: bool) -> bool:
+        """
+        Update availability of a menu item.
+        
+        Args:
+            item_type (str): Type of item (size, crust, topping)
+            item_name (str): Name of the item
+            available (bool): Availability status
+            
+        Returns:
+            bool: True if updated successfully
+        """
+        try:
+            if available:
+                self.temporarily_unavailable.discard(item_name)
+            else:
+                self.temporarily_unavailable.add(item_name)
+            
+            # Update Redis cache
+            await self._update_menu_in_redis(item_type, item_name, available)
+            
+            # Clear local cache to force reload
+            self._cached_menu = None
+            self._menu_cache_time = None
+            
+            logger.info(f"Updated {item_type} '{item_name}' availability: {available}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating item availability: {e}")
+            return False
+    
+    def calculate_order_total(self, pizzas: List[Dict[str, Any]]) -> Dict[str, float]:
+        """
+        Calculate order totals for validated pizzas.
+        
+        Args:
+            pizzas (list): List of validated pizzas
+            
+        Returns:
+            dict: Order total breakdown
+        """
+        return self._calculate_order_totals(pizzas)
+    
+    async def get_menu_suggestions(self, dietary_preferences: List[str] = None) -> List[Dict[str, Any]]:
+        """
+        Get menu suggestions based on dietary preferences.
+        
+        Args:
+            dietary_preferences (list): List of dietary preferences (vegetarian, etc.)
+            
+        Returns:
+            list: List of suggested pizza combinations
+        """
+        try:
+            menu = await self.get_current_menu()
+            suggestions = []
+            
+            # Popular combinations
+            popular_combos = [
+                {
+                    "name": "Pepperoni Classic",
+                    "size": "large",
+                    "crust": "thin",
+                    "toppings": ["pepperoni"],
+                    "description": "Our most popular pizza",
+                    "estimated_price": None
+                },
+                {
+                    "name": "Meat Lovers",
+                    "size": "large", 
+                    "crust": "thick",
+                    "toppings": ["pepperoni", "sausage", "ham"],
+                    "description": "For serious meat lovers",
+                    "estimated_price": None
+                },
+                {
+                    "name": "Veggie Supreme",
+                    "size": "medium",
+                    "crust": "thin",
+                    "toppings": ["mushrooms", "peppers", "onions", "olives"],
+                    "description": "Fresh vegetables on crispy crust",
+                    "estimated_price": None
+                },
+                {
+                    "name": "Hawaiian",
+                    "size": "medium",
+                    "crust": "thick",
+                    "toppings": ["ham", "pineapple"],
+                    "description": "Sweet and savory combination",
+                    "estimated_price": None
+                }
+            ]
+            
+            for combo in popular_combos:
+                # Check availability
+                if self._check_combo_availability(combo, menu):
+                    # Calculate price
+                    combo["estimated_price"] = self._calculate_pizza_price({
+                        "size": combo["size"],
+                        "crust": combo["crust"],
+                        "toppings": combo["toppings"],
+                        "quantity": 1
+                    }, menu)
+                    
+                    # Filter by dietary preferences
+                    if dietary_preferences:
+                        if "vegetarian" in dietary_preferences:
+                            is_vegetarian = all(
+                                menu["toppings"].get(topping, {}).get("vegetarian", False)
+                                for topping in combo["toppings"]
+                            )
+                            if is_vegetarian:
+                                suggestions.append(combo)
+                        else:
+                            suggestions.append(combo)
+                    else:
+                        suggestions.append(combo)
+            
+            return suggestions
+            
+        except Exception as e:
+            logger.error(f"Error getting menu suggestions: {e}")
+            return []
+    
+    async def _validate_order_constraints(self, pizzas: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Validate order-level business constraints."""
         errors = []
         warnings = []
@@ -252,20 +539,26 @@ class OrderValidator:
         
         return {"errors": errors, "warnings": warnings}
     
-    def _calculate_pizza_price(self, pizza: Dict[str, Any]) -> float:
-        """Calculate price for a single pizza."""
+    def _calculate_pizza_price(self, pizza: Dict[str, Any], menu: Optional[Dict[str, Any]] = None) -> float:
+        """Calculate price for a single pizza using current menu."""
+        if menu is None:
+            menu = self.default_menu
+        
         size = pizza.get("size")
         crust = pizza.get("crust", "thin")
         toppings = pizza.get("toppings", [])
         
         # Base price from size
-        base_price = self.menu["sizes"][size]["price"]
+        base_price = menu["sizes"][size]["price"]
         
         # Add crust cost
-        crust_price = self.menu["crusts"][crust]["price"]
+        crust_price = menu["crusts"][crust]["price"]
         
         # Add topping costs
-        topping_price = sum(self.menu["toppings"][topping] for topping in toppings)
+        topping_price = sum(
+            menu["toppings"].get(topping, {}).get("price", 0.0) 
+            for topping in toppings
+        )
         
         total_price = base_price + crust_price + topping_price
         
@@ -289,112 +582,141 @@ class OrderValidator:
         return {
             "subtotal": float(Decimal(str(subtotal)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
             "tax": float(Decimal(str(tax)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
+            "tax_rate": self.tax_rate,
             "delivery_fee": delivery_fee,
             "total": float(Decimal(str(total)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
         }
     
-    def get_menu_info(self) -> Dict[str, Any]:
-        """
-        Get current menu information.
+    def _calculate_dietary_info(self, toppings: List[str], menu: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate dietary information for a pizza."""
+        is_vegetarian = all(
+            menu["toppings"].get(topping, {}).get("vegetarian", False)
+            for topping in toppings
+        )
         
-        Returns:
-            dict: Complete menu with prices and options
-        """
+        categories = set()
+        for topping in toppings:
+            category = menu["toppings"].get(topping, {}).get("category", "unknown")
+            categories.add(category)
+        
         return {
-            "sizes": self.menu["sizes"],
-            "toppings": self.menu["toppings"],
-            "crusts": self.menu["crusts"],
-            "business_rules": {
-                "max_pizzas_per_order": self.max_pizzas_per_order,
-                "max_quantity_per_pizza": self.max_quantity_per_pizza,
-                "minimum_order_total": self.minimum_order_total,
-                "tax_rate": self.tax_rate,
-                "delivery_fee": self.delivery_fee
-            }
+            "vegetarian": is_vegetarian,
+            "has_meat": "meat" in categories or "seafood" in categories,
+            "has_dairy": "cheese" in categories,
+            "categories": list(categories)
         }
     
-    def suggest_popular_combinations(self) -> List[Dict[str, Any]]:
-        """
-        Get popular pizza combination suggestions.
+    def _check_combo_availability(self, combo: Dict[str, Any], menu: Dict[str, Any]) -> bool:
+        """Check if a pizza combination is available."""
+        # Check size availability
+        if not menu["sizes"].get(combo["size"], {}).get("available", False):
+            return False
         
-        Returns:
-            list: Popular pizza configurations
-        """
-        return [
-            {
-                "name": "Pepperoni Classic",
-                "size": "large",
-                "crust": "thin",
-                "toppings": ["pepperoni"],
-                "description": "Our most popular pizza"
-            },
-            {
-                "name": "Meat Lovers",
-                "size": "large", 
-                "crust": "thick",
-                "toppings": ["pepperoni", "sausage", "ham"],
-                "description": "For serious meat lovers"
-            },
-            {
-                "name": "Veggie Supreme",
-                "size": "medium",
-                "crust": "thin",
-                "toppings": ["mushrooms", "peppers", "onions", "olives"],
-                "description": "Fresh vegetables on crispy crust"
-            },
-            {
-                "name": "Hawaiian",
-                "size": "medium",
-                "crust": "thick",
-                "toppings": ["ham", "pineapple"],
-                "description": "Sweet and savory combination"
-            }
-        ]
+        # Check crust availability
+        if not menu["crusts"].get(combo["crust"], {}).get("available", False):
+            return False
+        
+        # Check topping availability
+        for topping in combo.get("toppings", []):
+            if not menu["toppings"].get(topping, {}).get("available", False):
+                return False
+            if topping in self.temporarily_unavailable:
+                return False
+        
+        return True
     
-    def validate_modification_request(self, current_order: Dict[str, Any], 
-                                    modification: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Validate a request to modify an existing order.
-        
-        Args:
-            current_order (dict): Existing order
-            modification (dict): Requested changes
-            
-        Returns:
-            dict: Validation result for modification
-        """
+    async def _check_applicable_promotions(self, pizzas: List[Dict[str, Any]], totals: Dict[str, float]) -> Dict[str, Any]:
+        """Check for applicable promotions and discounts."""
         try:
-            # For demo, support adding pizzas or changing quantities
-            if modification.get("action") == "add_pizza":
-                new_pizza = modification.get("pizza", {})
-                pizza_validation = self.validate_pizza(new_pizza)
-                
-                if pizza_validation["is_valid"]:
-                    # Check if adding this pizza would exceed limits
-                    current_pizzas = current_order.get("pizzas", [])
-                    current_count = sum(p.get("quantity", 1) for p in current_pizzas)
-                    new_count = new_pizza.get("quantity", 1)
-                    
-                    if current_count + new_count > self.max_pizzas_per_order:
-                        return {
-                            "is_valid": False,
-                            "errors": [f"Adding this pizza would exceed the maximum of {self.max_pizzas_per_order} pizzas per order"]
-                        }
-                
-                return pizza_validation
+            menu = await self.get_current_menu()
+            applicable_promotions = []
+            suggestions = []
+            
+            # Check special offers
+            for special in menu.get("specials", []):
+                if special.get("available", False):
+                    # Simple promotion logic - can be expanded
+                    if totals["subtotal"] >= 25.00:  # Minimum for promotions
+                        suggestions.append(f"Add {special['name']} for just ${special['price']:.2f} (save ${special.get('original_price', special['price']) - special['price']:.2f})")
             
             return {
-                "is_valid": False,
-                "errors": ["Unsupported modification type"]
+                "applicable_promotions": applicable_promotions,
+                "suggestions": suggestions
             }
             
         except Exception as e:
-            logger.error(f"Error validating modification: {e}")
-            return {
-                "is_valid": False,
-                "errors": [f"Modification validation error: {str(e)}"]
-            }
+            logger.error(f"Error checking promotions: {e}")
+            return {"applicable_promotions": [], "suggestions": []}
+    
+    async def _get_popular_suggestions(self) -> List[Dict[str, Any]]:
+        """Get popular pizza suggestions for empty orders."""
+        return await self.get_menu_suggestions()
+    
+    async def _load_menu_from_redis(self) -> Optional[Dict[str, Any]]:
+        """Load dynamic menu from Redis cache."""
+        try:
+            redis_client = await get_redis_async()
+            with redis_client.get_connection() as conn:
+                menu_data = conn.get("pizza_menu:current")
+                if menu_data:
+                    return json.loads(menu_data)
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Could not load menu from Redis: {e}")
+            return None
+    
+    async def _update_menu_in_redis(self, item_type: str, item_name: str, available: bool) -> None:
+        """Update menu item availability in Redis."""
+        try:
+            redis_client = await get_redis_async()
+            availability_key = f"pizza_menu:availability:{item_type}:{item_name}"
+            
+            with redis_client.get_connection() as conn:
+                conn.setex(availability_key, 3600, "available" if available else "unavailable")  # 1 hour TTL
+                
+        except Exception as e:
+            logger.warning(f"Could not update menu in Redis: {e}")
 
 
-# Export main class
-__all__ = ["OrderValidator"]
+# Create global validator instance
+order_validator = OrderValidator()
+
+
+# Utility functions for integration
+async def validate_order(order_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Utility function for order validation."""
+    return await order_validator.validate_order(order_data)
+
+
+async def validate_pizza(pizza_data: Dict[str, Any], position: int = 1) -> Dict[str, Any]:
+    """Utility function for pizza validation."""
+    menu = await order_validator.get_current_menu()
+    return await order_validator.validate_pizza(pizza_data, menu, position)
+
+
+async def get_menu_info() -> Dict[str, Any]:
+    """Utility function to get current menu information."""
+    return await order_validator.get_current_menu()
+
+
+async def check_menu_availability() -> Dict[str, Any]:
+    """Utility function to check menu availability."""
+    return await order_validator.check_menu_availability()
+
+
+async def get_menu_suggestions(dietary_preferences: List[str] = None) -> List[Dict[str, Any]]:
+    """Utility function to get menu suggestions."""
+    return await order_validator.get_menu_suggestions(dietary_preferences)
+
+
+def calculate_order_total(pizzas: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Utility function to calculate order totals."""
+    return order_validator.calculate_order_total(pizzas)
+
+
+# Export main components
+__all__ = [
+    "OrderValidator", "order_validator", "validate_order", "validate_pizza", 
+    "get_menu_info", "check_menu_availability", "get_menu_suggestions", "calculate_order_total"
+]

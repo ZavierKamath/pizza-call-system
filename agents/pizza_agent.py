@@ -25,6 +25,9 @@ from ..database import (
     create_order, get_order, OrderManager
 )
 from ..validation import AddressValidator, OrderValidator, PaymentValidator
+from ..validation.error_formatter import format_validation_summary
+from ..payment.stripe_client import stripe_client, create_payment_intent, confirm_payment
+from ..payment.payment_method_manager import payment_method_manager
 from ..agents.delivery_estimator import DeliveryEstimator
 from ..config.logging_config import get_logger, log_session_operation
 
@@ -71,6 +74,67 @@ class PizzaOrderingAgent:
         self.graph = self._build_graph()
         
         logger.info("PizzaOrderingAgent initialized successfully")
+    
+    async def process_input(self, current_state: OrderState, user_input: str) -> Dict[str, Any]:
+        """
+        Process user input through the pizza ordering agent.
+        
+        Args:
+            current_state (OrderState): Current conversation state
+            user_input (str): User's input text
+            
+        Returns:
+            dict: Response containing agent message and updated state
+        """
+        try:
+            # Update state with user input
+            current_state["user_input"] = user_input
+            
+            # Get current conversation state
+            conversation_state = current_state.get("current_state", "greeting")
+            
+            # Process through appropriate handler based on state
+            if conversation_state == "greeting":
+                response = await self._handle_greeting(current_state)
+            elif conversation_state == "collect_name":
+                response = await self._handle_collect_name(current_state)
+            elif conversation_state == "collect_address":
+                response = await self._handle_collect_address(current_state)
+            elif conversation_state == "collect_order":
+                response = await self._handle_collect_order(current_state)
+            elif conversation_state == "collect_payment_preference":
+                response = await self._handle_collect_payment_preference(current_state)
+            elif conversation_state == "validate_inputs":
+                response = await self._handle_validate_inputs(current_state)
+            elif conversation_state == "process_payment":
+                response = await self._handle_process_payment(current_state)
+            elif conversation_state == "estimate_delivery":
+                response = await self._handle_estimate_delivery(current_state)
+            elif conversation_state == "generate_ticket":
+                response = await self._handle_generate_ticket(current_state)
+            elif conversation_state == "confirmation":
+                response = await self._handle_confirmation(current_state)
+            else:
+                response = await self._handle_error(current_state)
+            
+            # Extract message for voice response
+            agent_message = response.get("agent_response", "I'm sorry, I didn't understand that.")
+            
+            return {
+                "state": response,
+                "message": agent_message
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing input: {str(e)}")
+            error_message = "I'm sorry, I'm having trouble processing your request. Could you please try again?"
+            current_state["current_state"] = "error"
+            current_state["last_error"] = str(e)
+            
+            return {
+                "state": current_state,
+                "message": error_message
+            }
     
     def _build_graph(self) -> StateGraph:
         """
@@ -309,7 +373,7 @@ class PizzaOrderingAgent:
             logger.error(f"Error in collect_name handler: {e}")
             return self._handle_error_in_state(state, str(e))
     
-    def _handle_collect_address(self, state: OrderState) -> OrderState:
+    async def _handle_collect_address(self, state: OrderState) -> OrderState:
         """Handle delivery address collection."""
         logger.info(f"Collecting address for session {state.get('session_id')}")
         
@@ -344,6 +408,24 @@ class PizzaOrderingAgent:
                 
                 if validation_result["is_valid"]:
                     updated_state["address"] = address_data
+                    
+                    # Calculate delivery estimate for validated address
+                    try:
+                        delivery_estimate = await self._calculate_delivery_estimate(address_data, updated_state)
+                        updated_state["delivery_estimate"] = delivery_estimate
+                        
+                        # Add delivery time info to the agent response
+                        estimate_text = f"Great! Your address is within our delivery area. " \
+                                      f"Estimated delivery time: {delivery_estimate['estimated_minutes']} minutes " \
+                                      f"(approximately {delivery_estimate['distance_miles']:.1f} miles away). "
+                        
+                        updated_state["agent_response"] = estimate_text + updated_state.get("agent_response", "")
+                        
+                        logger.info(f"Address validated with delivery estimate: {delivery_estimate['estimated_minutes']} minutes")
+                    except Exception as e:
+                        logger.warning(f"Error calculating delivery estimate: {e}")
+                        # Continue without estimate - don't fail the whole flow
+                    
                     updated_state["next_state"] = "collect_order"
                     logger.info(f"Address validated: {address_data}")
                 else:
@@ -486,19 +568,19 @@ class PizzaOrderingAgent:
             logger.error(f"Error in collect_payment_preference handler: {e}")
             return self._handle_error_in_state(state, str(e))
     
-    def _handle_validate_inputs(self, state: OrderState) -> OrderState:
+    async def _handle_validate_inputs(self, state: OrderState) -> OrderState:
         """Handle comprehensive order validation."""
         logger.info(f"Validating inputs for session {state.get('session_id')}")
         
         try:
             # Perform comprehensive validation
-            validation_results = self._perform_comprehensive_validation(state)
+            validation_results = await self._perform_comprehensive_validation(state)
             
             # Get appropriate prompt
             prompt = self.prompt_manager.get_prompt_for_state("validate_inputs", state)
             
-            # Build validation summary for LLM
-            validation_summary = self._build_validation_summary(validation_results)
+            # Build validation summary for LLM using user-friendly formatter
+            validation_summary = format_validation_summary(validation_results)
             
             # Build conversation context
             context_messages = self._build_conversation_context(state)
@@ -539,7 +621,7 @@ class PizzaOrderingAgent:
             logger.error(f"Error in validate_inputs handler: {e}")
             return self._handle_error_in_state(state, str(e))
     
-    def _handle_process_payment(self, state: OrderState) -> OrderState:
+    async def _handle_process_payment(self, state: OrderState) -> OrderState:
         """Handle payment processing."""
         logger.info(f"Processing payment for session {state.get('session_id')}")
         
@@ -551,7 +633,7 @@ class PizzaOrderingAgent:
             prompt = self.prompt_manager.get_prompt_for_state("process_payment", state)
             
             # Simulate payment processing based on method
-            payment_result = self._process_payment_transaction(state)
+            payment_result = await self._process_payment_transaction(state)
             
             # Build conversation context
             context_messages = self._build_conversation_context(state)
@@ -592,25 +674,45 @@ class PizzaOrderingAgent:
             logger.error(f"Error in process_payment handler: {e}")
             return self._handle_error_in_state(state, str(e))
     
-    def _handle_estimate_delivery(self, state: OrderState) -> OrderState:
-        """Handle delivery time estimation."""
+    async def _handle_estimate_delivery(self, state: OrderState) -> OrderState:
+        """Handle delivery time estimation using advanced delivery estimator."""
         logger.info(f"Estimating delivery for session {state.get('session_id')}")
         
         try:
-            # Calculate delivery estimate
-            delivery_estimate = self.delivery_estimator.estimate_delivery_time(
-                state.get("address", {}),
-                current_orders=self._get_current_order_count()
-            )
+            # Use delivery estimate if already calculated, otherwise calculate new one
+            if "delivery_estimate" in state:
+                delivery_estimate = state["delivery_estimate"]
+                logger.info("Using existing delivery estimate from state")
+            else:
+                # Calculate new delivery estimate
+                address_data = state.get("address", {})
+                if not address_data:
+                    raise Exception("No address available for delivery estimation")
+                
+                delivery_estimate = await self._calculate_delivery_estimate(address_data, state)
             
-            # Get appropriate prompt
-            prompt = self.prompt_manager.get_prompt_for_state("estimate_delivery", state)
+            # Format delivery information for response
+            estimate_minutes = delivery_estimate.get("estimated_minutes", 35)
+            distance_miles = delivery_estimate.get("distance_miles", 3.0)
+            confidence_score = delivery_estimate.get("confidence_score", 0.5)
+            delivery_zone = delivery_estimate.get("zone", "middle")
+            
+            # Create detailed delivery information message
+            delivery_info = f"Your order will be delivered in approximately {estimate_minutes} minutes. " \
+                          f"Your address is {distance_miles:.1f} miles away in our {delivery_zone} delivery zone."
+            
+            if confidence_score < 0.7:
+                delivery_info += " Please note that delivery times may vary due to current conditions."
+            
+            # Get appropriate prompt with delivery context
+            context = {**state, "delivery_estimate": delivery_estimate, "delivery_info": delivery_info}
+            prompt = self.prompt_manager.get_prompt_for_state("estimate_delivery", context)
             
             # Build conversation context
             context_messages = self._build_conversation_context(state)
             context_messages.extend([
                 SystemMessage(content=prompt),
-                HumanMessage(content=f"Estimate delivery time to {state.get('address', {}).get('street', 'customer address')}")
+                HumanMessage(content=f"Please confirm the delivery estimate: {delivery_info}")
             ])
             
             response = self.llm.invoke(context_messages)
@@ -619,10 +721,11 @@ class PizzaOrderingAgent:
             updated_state = state.copy()
             updated_state["agent_response"] = response.content
             updated_state["current_state"] = "estimate_delivery"
-            updated_state["delivery_time"] = delivery_estimate
+            updated_state["delivery_estimate"] = delivery_estimate
+            updated_state["delivery_time"] = estimate_minutes  # Legacy compatibility
             updated_state["next_state"] = "generate_ticket"
             
-            logger.info(f"Delivery estimated: {delivery_estimate} minutes")
+            logger.info(f"Delivery estimated: {estimate_minutes} minutes ({distance_miles:.1f} miles, {delivery_zone} zone)")
             
             # Update conversation history
             updated_state = self.state_manager.update_conversation_history(
@@ -962,6 +1065,109 @@ class PizzaOrderingAgent:
         required = ["street"]
         return all(field in address_data and address_data[field] for field in required)
     
+    async def _calculate_delivery_estimate(self, address_data: Dict[str, Any], state: OrderState) -> Dict[str, Any]:
+        """Calculate delivery time estimate for validated address."""
+        try:
+            # Convert address dict to string format for delivery estimator
+            address_str = self._format_address_string(address_data)
+            
+            # Get current order details for complexity assessment
+            order_data = {
+                "order_details": state.get("order", {}),
+                "session_id": state.get("session_id"),
+                "customer_name": state.get("customer_name")
+            }
+            
+            # Calculate estimate using delivery estimator
+            estimate = await self.delivery_estimator.estimate_delivery_time(address_str, order_data)
+            
+            # Convert DeliveryEstimate object to dict for state storage
+            estimate_dict = estimate.to_dict()
+            
+            # Store estimate in database for tracking
+            order_id = state.get("order_id")
+            if order_id:
+                await self._store_delivery_estimate_in_db(order_id, estimate)
+            
+            logger.info(f"Delivery estimate calculated: {estimate.estimated_minutes} minutes for {address_str}")
+            
+            return estimate_dict
+            
+        except ValueError as e:
+            # Address outside delivery radius
+            logger.warning(f"Address validation failed for delivery: {e}")
+            raise Exception(f"Sorry, that address is outside our delivery area. {str(e)}")
+            
+        except Exception as e:
+            logger.error(f"Error calculating delivery estimate: {e}")
+            # Return fallback estimate
+            return {
+                "estimated_minutes": 35,
+                "distance_miles": 3.0,
+                "confidence_score": 0.3,
+                "zone": "middle",
+                "created_at": datetime.utcnow().isoformat(),
+                "factors": {"fallback": True, "error": str(e)}
+            }
+    
+    def _format_address_string(self, address_data: Dict[str, Any]) -> str:
+        """Format address dictionary into string for delivery estimator."""
+        parts = []
+        
+        if address_data.get("street"):
+            street = address_data["street"]
+            if address_data.get("unit"):
+                street += f" #{address_data['unit']}"
+            parts.append(street)
+        
+        if address_data.get("city"):
+            parts.append(address_data["city"])
+        
+        if address_data.get("state"):
+            parts.append(address_data["state"])
+        
+        if address_data.get("zip"):
+            parts.append(address_data["zip"])
+        
+        return ", ".join(parts)
+    
+    async def _store_delivery_estimate_in_db(self, order_id: int, estimate: Any):
+        """Store delivery estimate in database for tracking and analysis."""
+        try:
+            from ..database.models import DeliveryEstimateRecord
+            from ..database import get_db_session
+            
+            async with get_db_session() as session:
+                # Deactivate previous estimates for this order
+                session.query(DeliveryEstimateRecord).filter(
+                    DeliveryEstimateRecord.order_id == order_id,
+                    DeliveryEstimateRecord.is_active == True
+                ).update({"is_active": False})
+                
+                # Create new estimate record
+                estimate_record = DeliveryEstimateRecord(
+                    order_id=order_id,
+                    estimated_minutes=estimate.estimated_minutes,
+                    distance_miles=estimate.distance_miles,
+                    base_time_minutes=estimate.base_time_minutes,
+                    distance_time_minutes=estimate.distance_time_minutes,
+                    load_time_minutes=estimate.load_time_minutes,
+                    random_variation_minutes=estimate.random_variation_minutes,
+                    confidence_score=estimate.confidence_score,
+                    delivery_zone=estimate.zone.value,
+                    factors_data=estimate.factors,
+                    is_active=True
+                )
+                
+                session.add(estimate_record)
+                session.commit()
+                
+                logger.debug(f"Stored delivery estimate in database for order {order_id}")
+                
+        except Exception as e:
+            logger.warning(f"Error storing delivery estimate in database: {e}")
+            # Don't fail the whole process if database storage fails
+    
     def _extract_pizza_order_from_input(self, user_input: str, state: OrderState) -> Optional[Dict[str, Any]]:
         """Extract pizza order details from user input."""
         pizza_order = {}
@@ -1036,8 +1242,8 @@ class PizzaOrderingAgent:
         
         return False  # Default to done
     
-    def _perform_comprehensive_validation(self, state: OrderState) -> Dict[str, ValidationResult]:
-        """Perform comprehensive validation of all order components."""
+    async def _perform_comprehensive_validation(self, state: OrderState) -> Dict[str, ValidationResult]:
+        """Perform comprehensive validation of all order components using validation engines."""
         results = {}
         
         # Validate customer name
@@ -1049,16 +1255,34 @@ class PizzaOrderingAgent:
             suggested_fix="Please provide a valid name"
         )
         
-        # Validate address
+        # Validate address using AddressValidator
         address = state.get("address")
         if address:
-            address_validation = self.address_validator.validate_address(address)
-            results["address"] = ValidationResult(
-                is_valid=address_validation["is_valid"],
-                field_name="address",
-                error_message=address_validation.get("error"),
-                suggested_fix="Please provide a complete delivery address"
-            )
+            try:
+                address_validation = await self.address_validator.validate_address(address)
+                results["address"] = ValidationResult(
+                    is_valid=address_validation["is_valid"],
+                    field_name="address",
+                    error_message="; ".join(address_validation.get("errors", [])) if not address_validation["is_valid"] else None,
+                    suggested_fix="Please provide a complete delivery address within our delivery area"
+                )
+                
+                # Store validated address details in state for later use
+                if address_validation["is_valid"]:
+                    state["validated_address"] = {
+                        "standardized_address": address_validation["standardized_address"],
+                        "coordinates": address_validation["coordinates"],
+                        "delivery_distance_miles": address_validation["delivery_distance_miles"]
+                    }
+                    
+            except Exception as e:
+                logger.error(f"Address validation error: {e}")
+                results["address"] = ValidationResult(
+                    is_valid=False,
+                    field_name="address",
+                    error_message="Address validation service temporarily unavailable",
+                    suggested_fix="Please try again or contact us directly"
+                )
         else:
             results["address"] = ValidationResult(
                 is_valid=False,
@@ -1067,24 +1291,105 @@ class PizzaOrderingAgent:
                 suggested_fix="Please provide your delivery address"
             )
         
-        # Validate order
+        # Validate order using OrderValidator
         pizzas = state.get("pizzas", [])
-        results["order"] = ValidationResult(
-            is_valid=len(pizzas) > 0,
-            field_name="pizzas",
-            error_message=None if pizzas else "No pizzas in order",
-            suggested_fix="Please add at least one pizza to your order"
-        )
+        if pizzas:
+            try:
+                order_data = {"pizzas": pizzas}
+                order_validation = await self.order_validator.validate_order(order_data)
+                
+                results["order"] = ValidationResult(
+                    is_valid=order_validation["is_valid"],
+                    field_name="pizzas",
+                    error_message="; ".join(order_validation.get("errors", [])) if not order_validation["is_valid"] else None,
+                    suggested_fix="Please review your pizza selections and quantities"
+                )
+                
+                # Store validated order details and pricing
+                if order_validation["is_valid"]:
+                    state["validated_order"] = order_validation["validated_order"]
+                    state["order_total"] = order_validation["calculated_total"]
+                    
+                    # Add any warnings to user feedback
+                    if order_validation.get("warnings"):
+                        results["order"].warnings = order_validation["warnings"]
+                        
+            except Exception as e:
+                logger.error(f"Order validation error: {e}")
+                results["order"] = ValidationResult(
+                    is_valid=False,
+                    field_name="pizzas",
+                    error_message="Order validation service temporarily unavailable",
+                    suggested_fix="Please try again or contact us directly"
+                )
+        else:
+            results["order"] = ValidationResult(
+                is_valid=False,
+                field_name="pizzas",
+                error_message="No pizzas in order",
+                suggested_fix="Please add at least one pizza to your order"
+            )
         
-        # Validate payment method
+        # Validate payment method using PaymentValidator
         payment_method = state.get("payment_method")
-        results["payment"] = ValidationResult(
-            is_valid=payment_method in ["credit_card", "debit_card", "cash"],
-            field_name="payment_method",
-            error_message=None if payment_method in ["credit_card", "debit_card", "cash"] else "Invalid payment method",
-            suggested_fix="Please choose credit card, debit card, or cash"
-        )
+        if payment_method:
+            try:
+                payment_validation = await self.payment_validator.validate_payment_method(payment_method)
+                
+                results["payment"] = ValidationResult(
+                    is_valid=payment_validation["is_valid"],
+                    field_name="payment_method",
+                    error_message="; ".join(payment_validation.get("errors", [])) if not payment_validation["is_valid"] else None,
+                    suggested_fix="Please choose from: credit card, debit card, or cash on delivery"
+                )
+                
+                # Store payment method details
+                if payment_validation["is_valid"]:
+                    state["validated_payment_method"] = {
+                        "method": payment_method,
+                        "requires_card_details": payment_validation.get("requires_card_details", False),
+                        "stripe_integration": payment_validation.get("stripe_integration", False)
+                    }
+                    
+            except Exception as e:
+                logger.error(f"Payment validation error: {e}")
+                results["payment"] = ValidationResult(
+                    is_valid=False,
+                    field_name="payment_method",
+                    error_message="Payment validation service temporarily unavailable",
+                    suggested_fix="Please try again or contact us directly"
+                )
+        else:
+            results["payment"] = ValidationResult(
+                is_valid=False,
+                field_name="payment_method",
+                error_message="No payment method selected",
+                suggested_fix="Please choose credit card, debit card, or cash on delivery"
+            )
         
+        # Validate payment amount consistency
+        if state.get("order_total") and state.get("validated_order"):
+            expected_total = state["validated_order"]["totals"]["total"]
+            actual_total = state.get("order_total", 0.0)
+            
+            if abs(expected_total - actual_total) > 0.01:  # Allow for small rounding differences
+                results["payment_amount"] = ValidationResult(
+                    is_valid=False,
+                    field_name="order_total",
+                    error_message=f"Order total mismatch: expected ${expected_total:.2f}, got ${actual_total:.2f}",
+                    suggested_fix="Please recalculate the order total"
+                )
+                # Update state with correct total
+                state["order_total"] = expected_total
+            else:
+                results["payment_amount"] = ValidationResult(
+                    is_valid=True,
+                    field_name="order_total",
+                    error_message=None,
+                    suggested_fix=None
+                )
+        
+        logger.info(f"Validation completed: {sum(1 for r in results.values() if r['is_valid'])}/{len(results)} checks passed")
         return results
     
     def _build_validation_summary(self, validation_results: Dict[str, ValidationResult]) -> str:
@@ -1111,38 +1416,163 @@ class PizzaOrderingAgent:
         else:
             return "error"
     
-    def _process_payment_transaction(self, state: OrderState) -> Dict[str, Any]:
-        """Simulate payment processing."""
-        payment_method = state.get("payment_method")
-        amount = state.get("order_total", 0.0)
-        
-        if payment_method == "cash":
-            # Cash payment - no processing needed
+    async def _process_payment_transaction(self, state: OrderState) -> Dict[str, Any]:
+        """Process payment using integrated Stripe client."""
+        try:
+            payment_method = state.get("payment_method")
+            amount = state.get("order_total", 0.0)
+            validated_payment = state.get("validated_payment_method", {})
+            
+            logger.info(f"Processing {payment_method} payment for ${amount:.2f}")
+            
+            # Handle cash payment
+            if payment_method == "cash":
+                return await self._process_cash_payment(state, amount)
+            
+            # Handle card payments with Stripe
+            elif payment_method in ["credit_card", "debit_card"]:
+                return await self._process_stripe_payment(state, amount)
+            
+            else:
+                return {
+                    "success": False,
+                    "errors": ["Unsupported payment method"],
+                    "method": payment_method
+                }
+            
+        except Exception as e:
+            logger.error(f"Payment processing error: {e}")
             return {
-                "success": True,
+                "success": False,
+                "errors": [f"Payment processing failed: {str(e)}"],
+                "method": payment_method or "unknown"
+            }
+    
+    async def _process_cash_payment(self, state: OrderState, amount: float) -> Dict[str, Any]:
+        """Process cash payment (no charge processing needed)."""
+        try:
+            # Generate transaction ID for tracking
+            transaction_id = f"cash_{uuid.uuid4().hex[:8]}"
+            
+            # Store payment confirmation details in state
+            state["payment_confirmation"] = {
+                "transaction_id": transaction_id,
+                "payment_intent_id": None,
                 "method": "cash",
                 "amount": amount,
-                "message": "Cash payment confirmed for delivery"
+                "requires_confirmation": False
             }
-        
-        elif payment_method in ["credit_card", "debit_card"]:
-            # Simulate card processing
-            # In real implementation, integrate with Stripe or other processor
-            transaction_id = f"txn_{uuid.uuid4().hex[:8]}"
             
             return {
                 "success": True,
-                "method": payment_method,
+                "payment_method": "cash",
                 "amount": amount,
                 "transaction_id": transaction_id,
-                "last_four": "1234",  # Mock card number
-                "message": f"Payment of ${amount:.2f} processed successfully"
+                "message": f"Cash payment of ${amount:.2f} confirmed for delivery",
+                "instructions": "Please have exact change ready for the delivery driver"
             }
-        
-        else:
+            
+        except Exception as e:
+            logger.error(f"Cash payment processing error: {e}")
             return {
                 "success": False,
-                "error": "Invalid payment method"
+                "errors": ["Cash payment processing failed"],
+                "method": "cash"
+            }
+    
+    async def _process_stripe_payment(self, state: OrderState, amount: float) -> Dict[str, Any]:
+        """Process Stripe payment with payment intent creation."""
+        try:
+            # Extract customer and order information
+            customer_info = {
+                "name": state.get("customer_name"),
+                "email": state.get("customer_email"),
+                "phone": state.get("phone_number")
+            }
+            
+            order_info = {
+                "order_id": state.get("order_id"),
+                "session_id": state.get("session_id"),
+                "customer_phone": state.get("phone_number"),
+                "pizza_count": len(state.get("pizzas", [])),
+                "delivery_address": state.get("validated_address", {}).get("standardized_address", "")
+            }
+            
+            # Check if we already have a payment intent
+            existing_payment_intent = state.get("payment_intent_id")
+            if existing_payment_intent:
+                # Try to confirm existing payment intent
+                confirmation_result = await confirm_payment(existing_payment_intent)
+                
+                if confirmation_result["success"]:
+                    # Store confirmation details
+                    state["payment_confirmation"] = {
+                        "transaction_id": confirmation_result["transaction_id"],
+                        "payment_intent_id": confirmation_result["payment_intent_id"],
+                        "method": state.get("payment_method"),
+                        "amount": amount,
+                        "requires_confirmation": False,
+                        "receipt_url": confirmation_result.get("receipt_url")
+                    }
+                    
+                    logger.info(f"Payment confirmed successfully: {confirmation_result['transaction_id']}")
+                    return confirmation_result
+                
+                else:
+                    logger.warning(f"Payment confirmation failed, creating new payment intent")
+            
+            # Create new payment intent
+            payment_intent_result = await create_payment_intent(
+                amount=amount,
+                customer_info=customer_info,
+                order_info=order_info
+            )
+            
+            if payment_intent_result["success"]:
+                # Store payment intent in state
+                state["payment_intent_id"] = payment_intent_result["payment_intent_id"]
+                state["payment_client_secret"] = payment_intent_result["client_secret"]
+                
+                # For automatic confirmation (when payment method is already attached)
+                payment_method_id = state.get("stripe_payment_method_id")
+                if payment_method_id:
+                    confirmation_result = await confirm_payment(payment_intent_result["payment_intent_id"])
+                    
+                    if confirmation_result["success"]:
+                        state["payment_confirmation"] = {
+                            "transaction_id": confirmation_result["transaction_id"],
+                            "payment_intent_id": confirmation_result["payment_intent_id"],
+                            "method": state.get("payment_method"),
+                            "amount": amount,
+                            "requires_confirmation": False,
+                            "receipt_url": confirmation_result.get("receipt_url")
+                        }
+                        
+                        return confirmation_result
+                    else:
+                        return confirmation_result
+                
+                else:
+                    # Payment intent created but requires customer action
+                    return {
+                        "success": True,
+                        "payment_intent_created": True,
+                        "payment_intent_id": payment_intent_result["payment_intent_id"],
+                        "client_secret": payment_intent_result["client_secret"],
+                        "requires_action": payment_intent_result.get("requires_action", False),
+                        "amount": amount,
+                        "message": f"Payment intent created for ${amount:.2f}. Please complete payment."
+                    }
+            
+            else:
+                return payment_intent_result
+            
+        except Exception as e:
+            logger.error(f"Stripe payment processing error: {e}")
+            return {
+                "success": False,
+                "errors": ["Stripe payment processing failed"],
+                "method": "credit_card"
             }
     
     def _get_current_order_count(self) -> int:

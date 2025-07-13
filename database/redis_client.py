@@ -467,3 +467,15 @@ def get_redis_client() -> RedisClient:
     if not redis_client._initialized:
         redis_client.initialize()
     return redis_client
+
+
+async def get_redis_async() -> RedisClient:
+    """
+    Async version of get_redis_client for async operations.
+    
+    Returns:
+        RedisClient: Initialized Redis client
+    """
+    if not redis_client._initialized:
+        redis_client.initialize()
+    return redis_client
