@@ -39,7 +39,7 @@ class SpeechProcessor:
         self.supported_formats = ['wav', 'mp3', 'mp4', 'm4a', 'ogg', 'webm']
         
         # TTS settings optimized for phone calls
-        self.tts_voice = "alloy"  # Clear, neutral voice for pizza ordering
+        self.tts_voice = "onyx"  # Deep, warm male voice for pizza ordering
         self.tts_model = "tts-1"  # Standard quality for real-time use
         self.tts_format = "mp3"   # Compressed format for faster streaming
         

@@ -240,7 +240,7 @@ class TwilioHandler:
         
         gather.say(
             "Hi! Tony's Pizza. Can I get your name to start your order?",
-            voice='alice',
+            voice='man',
             language='en-US'
         )
         
@@ -249,7 +249,7 @@ class TwilioHandler:
         # Fallback if no speech detected
         response.say(
             "Sorry, I didn't hear you. Please call back. Goodbye!",
-            voice='alice',
+            voice='man',
             language='en-US'
         )
         response.hangup()
@@ -287,7 +287,7 @@ class TwilioHandler:
             if audio_url:
                 response.play(audio_url)
             else:
-                response.say(message, voice='alice', language='en-US')
+                response.say(message, voice='man', language='en-US')
             response.hangup()
             
         elif current_state == 'error':
@@ -295,7 +295,7 @@ class TwilioHandler:
             if audio_url:
                 response.play(audio_url)
             else:
-                response.say(message, voice='alice', language='en-US')
+                response.say(message, voice='man', language='en-US')
             
             gather = Gather(
                 input='speech',
@@ -308,12 +308,12 @@ class TwilioHandler:
             )
             gather.say(
                 "Would you like to try again or would you prefer to call back later?",
-                voice='alice',
+                voice='man',
                 language='en-US'
             )
             response.append(gather)
             
-            response.say("Okay, please call back when you're ready. Goodbye!", voice='alice', language='en-US')
+            response.say("Okay, please call back when you're ready. Goodbye!", voice='man', language='en-US')
             response.hangup()
             
         else:
@@ -332,14 +332,14 @@ class TwilioHandler:
             if audio_url:
                 gather.play(audio_url)
             else:
-                gather.say(message, voice='alice', language='en-US')
+                gather.say(message, voice='man', language='en-US')
             
             response.append(gather)
             
             # Timeout fallback
             response.say(
                 "I didn't hear a response. Please call back when you're ready to continue your order. Goodbye!",
-                voice='alice',
+                voice='man',
                 language='en-US'
             )
             response.hangup()
@@ -351,7 +351,7 @@ class TwilioHandler:
         response = VoiceResponse()
         response.say(
             "Tony's Pizza. We're busy right now. Please call back in a few minutes. Thanks!",
-            voice='alice',
+            voice='man',
             language='en-US'
         )
         response.hangup()
@@ -362,7 +362,7 @@ class TwilioHandler:
         response = VoiceResponse()
         response.say(
             "Sorry, we're having technical issues. Please call back in a few minutes. Thanks!",
-            voice='alice',
+            voice='man',
             language='en-US'
         )
         response.hangup()
@@ -384,7 +384,7 @@ class TwilioHandler:
         
         gather.say(
             "Sorry, didn't catch that. Can you repeat?",
-            voice='alice',
+            voice='man',
             language='en-US'
         )
         
@@ -392,7 +392,7 @@ class TwilioHandler:
         
         response.say(
             "Having trouble hearing you. Please call back. Bye!",
-            voice='alice',
+            voice='man',
             language='en-US'
         )
         response.hangup()

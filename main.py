@@ -272,6 +272,48 @@ async def get_session_statistics():
         raise HTTPException(status_code=500, detail="Failed to get session statistics")
 
 
+@app.post("/api/sessions/cleanup")
+async def cleanup_sessions_endpoint():
+    """
+    Manually trigger cleanup of expired sessions.
+    """
+    try:
+        from voice.session_manager import cleanup_sessions
+        cleaned_count = await cleanup_sessions()
+        return {"message": f"Cleaned up {cleaned_count} expired sessions"}
+    except Exception as e:
+        logger.error(f"Error cleaning up sessions: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to cleanup sessions")
+
+
+@app.post("/api/sessions/reset")
+async def reset_session_counter():
+    """
+    Reset the session counter and clear all active sessions (for development/testing).
+    """
+    try:
+        from voice.session_manager import session_manager
+        from database.redis_client import get_redis_async
+        
+        # Reset Redis counter and clear active sessions set
+        redis_client = await get_redis_async()
+        with redis_client.get_connection() as conn:
+            conn.set(session_manager.session_count_key, 0)
+            conn.delete(session_manager.active_sessions_key)
+        
+        # Also clear database active sessions
+        from database.connection import db_manager
+        from database.models import ActiveSession
+        with db_manager.get_session() as db_session:
+            db_session.query(ActiveSession).delete()
+            db_session.commit()
+        
+        return {"message": "All session data reset to 0"}
+    except Exception as e:
+        logger.error(f"Error resetting session data: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to reset session data")
+
+
 # Payment webhook endpoints
 @app.post("/webhooks/stripe")
 async def stripe_webhook_handler(request: Request, background_tasks: BackgroundTasks):

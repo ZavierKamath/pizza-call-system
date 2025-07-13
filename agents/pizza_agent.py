@@ -96,15 +96,15 @@ class PizzaOrderingAgent:
             
             # Process through appropriate handler based on state
             if conversation_state == "greeting":
-                response = self._handle_greeting(current_state)
+                response = await self._handle_greeting(current_state)
             elif conversation_state == "collect_name":
-                response = self._handle_collect_name(current_state)
+                response = await self._handle_collect_name(current_state)
             elif conversation_state == "collect_address":
                 response = await self._handle_collect_address(current_state)
             elif conversation_state == "collect_order":
-                response = self._handle_collect_order(current_state)
+                response = await self._handle_collect_order(current_state)
             elif conversation_state == "collect_payment_preference":
-                response = self._handle_collect_payment_preference(current_state)
+                response = await self._handle_collect_payment_preference(current_state)
             elif conversation_state == "validate_inputs":
                 response = await self._handle_validate_inputs(current_state)
             elif conversation_state == "process_payment":
@@ -112,11 +112,11 @@ class PizzaOrderingAgent:
             elif conversation_state == "estimate_delivery":
                 response = await self._handle_estimate_delivery(current_state)
             elif conversation_state == "generate_ticket":
-                response = self._handle_generate_ticket(current_state)
+                response = await self._handle_generate_ticket(current_state)
             elif conversation_state == "confirmation":
-                response = self._handle_confirmation(current_state)
+                response = await self._handle_confirmation(current_state)
             else:
-                response = self._handle_error(current_state)
+                response = await self._handle_error(current_state)
             
             # Apply state transition if needed
             if "next_state" in response and response["next_state"]:
@@ -285,7 +285,7 @@ class PizzaOrderingAgent:
     
     # Node handler implementations
     
-    def _handle_greeting(self, state: OrderState) -> OrderState:
+    async def _handle_greeting(self, state: OrderState) -> OrderState:
         """Handle initial customer greeting."""
         logger.info(f"Processing greeting for session {state.get('session_id')}")
         
@@ -312,7 +312,7 @@ class PizzaOrderingAgent:
                     HumanMessage(content=user_input)
                 ]
                 
-                response = self.llm.invoke(messages)
+                response = await self.llm.ainvoke(messages)
                 
                 updated_state = state.copy()
                 updated_state["agent_response"] = response.content
@@ -340,9 +340,9 @@ class PizzaOrderingAgent:
             
         except Exception as e:
             logger.error(f"Error in greeting handler: {e}")
-            return self._handle_error_in_state(state, str(e))
+            return await self._handle_error_in_state(state, str(e))
     
-    def _handle_collect_name(self, state: OrderState) -> OrderState:
+    async def _handle_collect_name(self, state: OrderState) -> OrderState:
         """Handle customer name collection."""
         logger.info(f"Collecting name for session {state.get('session_id')}")
         
@@ -364,7 +364,7 @@ class PizzaOrderingAgent:
                 HumanMessage(content=user_input)
             ])
             
-            response = self.llm.invoke(context_messages)
+            response = await self.llm.ainvoke(context_messages)
             
             # Update state
             updated_state = state.copy()
@@ -393,7 +393,7 @@ class PizzaOrderingAgent:
             
         except Exception as e:
             logger.error(f"Error in collect_name handler: {e}")
-            return self._handle_error_in_state(state, str(e))
+            return await self._handle_error_in_state(state, str(e))
     
     async def _handle_collect_address(self, state: OrderState) -> OrderState:
         """Handle delivery address collection."""
@@ -406,6 +406,8 @@ class PizzaOrderingAgent:
             
             # Extract address components from input
             address_data = self._extract_address_from_input(user_input, state)
+            logger.info(f"Address extraction result: {address_data}")
+            logger.info(f"User input for address: '{user_input}'")
             
             # Get appropriate prompt
             prompt = self.prompt_manager.get_prompt_for_state("collect_address", state)
@@ -417,7 +419,7 @@ class PizzaOrderingAgent:
                 HumanMessage(content=user_input)
             ])
             
-            response = self.llm.invoke(context_messages)
+            response = await self.llm.ainvoke(context_messages)
             
             # Update state
             updated_state = state.copy()
@@ -426,7 +428,7 @@ class PizzaOrderingAgent:
             
             # Validate address if we have enough information
             if address_data and self._is_address_complete(address_data):
-                validation_result = self.address_validator.validate_address(address_data)
+                validation_result = await self.address_validator.validate_address(address_data)
                 
                 if validation_result["is_valid"]:
                     updated_state["address"] = address_data
@@ -454,11 +456,15 @@ class PizzaOrderingAgent:
                     updated_state["next_state"] = "collect_address"  # Retry
                     updated_state["last_error"] = validation_result.get("error", "Invalid address")
             else:
-                # Need more address information
-                updated_state["next_state"] = "collect_address"
+                # Need more address information or address validation failed
+                updated_state["next_state"] = "collect_address"  # Stay in address collection
+                logger.info(f"Address incomplete or invalid, staying in collect_address state")
                 if address_data:
                     # Partial address - store what we have
                     updated_state["address"] = {**updated_state.get("address", {}), **address_data}
+                    logger.info(f"Stored partial address: {updated_state.get('address')}")
+                else:
+                    logger.info("No address data extracted from user input")
             
             # Update conversation history
             updated_state = self.state_manager.update_conversation_history(
@@ -472,9 +478,9 @@ class PizzaOrderingAgent:
             
         except Exception as e:
             logger.error(f"Error in collect_address handler: {e}")
-            return self._handle_error_in_state(state, str(e))
+            return await self._handle_error_in_state(state, str(e))
     
-    def _handle_collect_order(self, state: OrderState) -> OrderState:
+    async def _handle_collect_order(self, state: OrderState) -> OrderState:
         """Handle pizza order collection."""
         logger.info(f"Collecting order for session {state.get('session_id')}")
         
@@ -497,7 +503,7 @@ class PizzaOrderingAgent:
                 HumanMessage(content=user_input)
             ])
             
-            response = self.llm.invoke(context_messages)
+            response = await self.llm.ainvoke(context_messages)
             
             # Update state
             updated_state = state.copy()
@@ -535,9 +541,9 @@ class PizzaOrderingAgent:
             
         except Exception as e:
             logger.error(f"Error in collect_order handler: {e}")
-            return self._handle_error_in_state(state, str(e))
+            return await self._handle_error_in_state(state, str(e))
     
-    def _handle_collect_payment_preference(self, state: OrderState) -> OrderState:
+    async def _handle_collect_payment_preference(self, state: OrderState) -> OrderState:
         """Handle payment method selection."""
         logger.info(f"Collecting payment preference for session {state.get('session_id')}")
         
@@ -559,7 +565,7 @@ class PizzaOrderingAgent:
                 HumanMessage(content=user_input)
             ])
             
-            response = self.llm.invoke(context_messages)
+            response = await self.llm.ainvoke(context_messages)
             
             # Update state
             updated_state = state.copy()
@@ -588,7 +594,7 @@ class PizzaOrderingAgent:
             
         except Exception as e:
             logger.error(f"Error in collect_payment_preference handler: {e}")
-            return self._handle_error_in_state(state, str(e))
+            return await self._handle_error_in_state(state, str(e))
     
     async def _handle_validate_inputs(self, state: OrderState) -> OrderState:
         """Handle comprehensive order validation."""
@@ -611,7 +617,7 @@ class PizzaOrderingAgent:
                 HumanMessage(content=state.get("user_input", "Please validate my order"))
             ])
             
-            response = self.llm.invoke(context_messages)
+            response = await self.llm.ainvoke(context_messages)
             
             # Update state
             updated_state = state.copy()
@@ -641,7 +647,7 @@ class PizzaOrderingAgent:
             
         except Exception as e:
             logger.error(f"Error in validate_inputs handler: {e}")
-            return self._handle_error_in_state(state, str(e))
+            return await self._handle_error_in_state(state, str(e))
     
     async def _handle_process_payment(self, state: OrderState) -> OrderState:
         """Handle payment processing."""
@@ -664,7 +670,7 @@ class PizzaOrderingAgent:
                 HumanMessage(content=f"Process {payment_method} payment for ${order_total:.2f}")
             ])
             
-            response = self.llm.invoke(context_messages)
+            response = await self.llm.ainvoke(context_messages)
             
             # Update state
             updated_state = state.copy()
@@ -694,7 +700,7 @@ class PizzaOrderingAgent:
             
         except Exception as e:
             logger.error(f"Error in process_payment handler: {e}")
-            return self._handle_error_in_state(state, str(e))
+            return await self._handle_error_in_state(state, str(e))
     
     async def _handle_estimate_delivery(self, state: OrderState) -> OrderState:
         """Handle delivery time estimation using advanced delivery estimator."""
@@ -737,7 +743,7 @@ class PizzaOrderingAgent:
                 HumanMessage(content=f"Please confirm the delivery estimate: {delivery_info}")
             ])
             
-            response = self.llm.invoke(context_messages)
+            response = await self.llm.ainvoke(context_messages)
             
             # Update state
             updated_state = state.copy()
@@ -758,9 +764,9 @@ class PizzaOrderingAgent:
             
         except Exception as e:
             logger.error(f"Error in estimate_delivery handler: {e}")
-            return self._handle_error_in_state(state, str(e))
+            return await self._handle_error_in_state(state, str(e))
     
-    def _handle_generate_ticket(self, state: OrderState) -> OrderState:
+    async def _handle_generate_ticket(self, state: OrderState) -> OrderState:
         """Handle order ticket generation."""
         logger.info(f"Generating ticket for session {state.get('session_id')}")
         
@@ -785,7 +791,7 @@ class PizzaOrderingAgent:
                 HumanMessage(content=f"Generate order ticket #{ticket_id}")
             ])
             
-            response = self.llm.invoke(context_messages)
+            response = await self.llm.ainvoke(context_messages)
             
             # Update state
             updated_state = state.copy()
@@ -805,9 +811,9 @@ class PizzaOrderingAgent:
             
         except Exception as e:
             logger.error(f"Error in generate_ticket handler: {e}")
-            return self._handle_error_in_state(state, str(e))
+            return await self._handle_error_in_state(state, str(e))
     
-    def _handle_confirmation(self, state: OrderState) -> OrderState:
+    async def _handle_confirmation(self, state: OrderState) -> OrderState:
         """Handle final order confirmation."""
         logger.info(f"Confirming order for session {state.get('session_id')}")
         
@@ -822,7 +828,7 @@ class PizzaOrderingAgent:
                 HumanMessage(content="Confirm the order details")
             ])
             
-            response = self.llm.invoke(context_messages)
+            response = await self.llm.ainvoke(context_messages)
             
             # Update state
             updated_state = state.copy()
@@ -857,9 +863,9 @@ class PizzaOrderingAgent:
             
         except Exception as e:
             logger.error(f"Error in confirmation handler: {e}")
-            return self._handle_error_in_state(state, str(e))
+            return await self._handle_error_in_state(state, str(e))
     
-    def _handle_error(self, state: OrderState) -> OrderState:
+    async def _handle_error(self, state: OrderState) -> OrderState:
         """Handle error states and recovery."""
         logger.warning(f"Handling error for session {state.get('session_id')}")
         
@@ -877,7 +883,7 @@ class PizzaOrderingAgent:
                 HumanMessage(content="Handle the error and guide recovery")
             ])
             
-            response = self.llm.invoke(context_messages)
+            response = await self.llm.ainvoke(context_messages)
             
             # Update state
             updated_state = state.copy()
@@ -912,7 +918,7 @@ class PizzaOrderingAgent:
     
     # Helper methods for the agent
     
-    def _handle_error_in_state(self, state: OrderState, error_message: str) -> OrderState:
+    async def _handle_error_in_state(self, state: OrderState, error_message: str) -> OrderState:
         """Helper to handle errors within state handlers."""
         updated_state = state.copy()
         updated_state["last_error"] = error_message
