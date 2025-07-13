@@ -16,7 +16,7 @@ from .websocket import (
     authenticate_websocket,
     MessageType
 )
-from ..config.logging_config import get_logger
+from config.logging_config import get_logger
 
 # Configure logging
 logger = get_logger(__name__)

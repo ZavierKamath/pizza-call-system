@@ -11,10 +11,10 @@ from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Gather, Say, Record
 import asyncio
 
-from ..config.settings import settings
-from ..database.redis_client import get_redis_async
-from ..agents.pizza_agent import PizzaOrderingAgent
-from ..agents.states import StateManager, OrderState
+from config.settings import settings
+from database.redis_client import get_redis_async
+from agents.pizza_agent import PizzaOrderingAgent
+from agents.states import StateManager, OrderState
 from .session_manager import session_manager
 from .speech_processing import speech_processor
 
@@ -144,7 +144,7 @@ class TwilioHandler:
             await self._store_call_state(call_sid, updated_state)
             
             # Generate TwiML response based on agent output
-            response = await self._create_agent_response(call_sid, agent_message, updated_state)
+            response = await self._create_agent_response(call_sid, agent_message, updated_state, request)
             
             logger.info(f"Processed speech for call {call_sid}, new state: {updated_state.get('current_state')}")
             return str(response)
@@ -227,15 +227,6 @@ class TwilioHandler:
         """
         response = VoiceResponse()
         
-        # Start call recording for quality and debugging
-        response.record(
-            action=f'/voice/recording-complete',
-            method='POST',
-            max_length=300,  # 5 minutes max recording
-            play_beep=False,
-            trim='do-not-trim'
-        )
-        
         # Greeting message with speech gathering
         gather = Gather(
             input='speech',
@@ -248,8 +239,7 @@ class TwilioHandler:
         )
         
         gather.say(
-            "Hello! Welcome to Tony's Pizza. I'm your AI assistant and I'm ready to take your order. "
-            "You can tell me what you'd like, and I'll help you place your order. What can I get for you today?",
+            "Hi! Tony's Pizza. Can I get your name to start your order?",
             voice='alice',
             language='en-US'
         )
@@ -258,7 +248,7 @@ class TwilioHandler:
         
         # Fallback if no speech detected
         response.say(
-            "I didn't hear anything. Please call back when you're ready to order. Goodbye!",
+            "Sorry, I didn't hear you. Please call back. Goodbye!",
             voice='alice',
             language='en-US'
         )
@@ -266,7 +256,7 @@ class TwilioHandler:
         
         return response
     
-    async def _create_agent_response(self, call_sid: str, message: str, state: OrderState) -> VoiceResponse:
+    async def _create_agent_response(self, call_sid: str, message: str, state: OrderState, request: Request = None) -> VoiceResponse:
         """
         Create TwiML response based on agent message and current state.
         
@@ -274,6 +264,7 @@ class TwilioHandler:
             call_sid (str): Twilio call identifier
             message (str): Agent's response message
             state (OrderState): Current conversation state
+            request (Request): FastAPI request object for URL construction
             
         Returns:
             VoiceResponse: TwiML response for continuing conversation
@@ -283,6 +274,13 @@ class TwilioHandler:
         
         # Convert text to speech if needed
         audio_url = await speech_processor.text_to_speech(message)
+        
+        # Convert relative URL to absolute URL for Twilio
+        if audio_url and audio_url.startswith('/static/') and request:
+            # Use the request's base URL (ngrok URL when tunneling)
+            base_url = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+            audio_url = base_url + audio_url
+            logger.debug(f"Audio URL for Twilio: {audio_url}")
         
         if current_state == 'complete':
             # Order complete - thank customer and hang up
@@ -352,9 +350,7 @@ class TwilioHandler:
         """Create TwiML response for when system is at capacity."""
         response = VoiceResponse()
         response.say(
-            "Thank you for calling Tony's Pizza. We're currently experiencing high call volume. "
-            "Please try calling back in a few minutes. You can also visit our website to place an order online. "
-            "Thank you for your patience!",
+            "Tony's Pizza. We're busy right now. Please call back in a few minutes. Thanks!",
             voice='alice',
             language='en-US'
         )
@@ -365,9 +361,7 @@ class TwilioHandler:
         """Create TwiML response for system errors."""
         response = VoiceResponse()
         response.say(
-            "I'm sorry, we're experiencing technical difficulties. "
-            "Please try calling back in a few minutes or visit our website to place your order. "
-            "Thank you for your patience!",
+            "Sorry, we're having technical issues. Please call back in a few minutes. Thanks!",
             voice='alice',
             language='en-US'
         )
@@ -389,7 +383,7 @@ class TwilioHandler:
         )
         
         gather.say(
-            "I'm sorry, I didn't catch that. Could you please repeat what you'd like to order?",
+            "Sorry, didn't catch that. Can you repeat?",
             voice='alice',
             language='en-US'
         )
@@ -397,7 +391,7 @@ class TwilioHandler:
         response.append(gather)
         
         response.say(
-            "I'm having trouble hearing you. Please call back with a better connection. Goodbye!",
+            "Having trouble hearing you. Please call back. Bye!",
             voice='alice',
             language='en-US'
         )

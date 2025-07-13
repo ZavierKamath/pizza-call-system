@@ -17,7 +17,8 @@ import json
 from openai import AsyncOpenAI
 import requests
 
-from ..config.settings import settings
+from config.settings import settings
+from pathlib import Path
 
 # Configure logging for speech processing
 logger = logging.getLogger(__name__)
@@ -41,6 +42,10 @@ class SpeechProcessor:
         self.tts_voice = "alloy"  # Clear, neutral voice for pizza ordering
         self.tts_model = "tts-1"  # Standard quality for real-time use
         self.tts_format = "mp3"   # Compressed format for faster streaming
+        
+        # Audio storage configuration
+        self.audio_dir = Path("static/audio")
+        self.audio_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info("SpeechProcessor initialized with OpenAI integration")
     
@@ -133,23 +138,23 @@ class SpeechProcessor:
                 speed=1.0  # Normal speaking rate for clarity
             )
             
-            # Save audio to temporary file
+            # Save audio to static directory
             audio_filename = f"tts_{hash(cleaned_text)}_{voice_to_use}.{self.tts_format}"
-            audio_path = os.path.join(tempfile.gettempdir(), audio_filename)
+            audio_path = self.audio_dir / audio_filename
             
             # Write audio data to file
             with open(audio_path, 'wb') as audio_file:
-                async for chunk in response.iter_bytes():
-                    audio_file.write(chunk)
+                audio_file.write(response.content)
             
             # Optimize audio for phone calls if requested
             if optimize_for_phone:
-                audio_path = await self._optimize_audio_for_phone(audio_path)
+                audio_path = await self._optimize_audio_for_phone(str(audio_path))
+                audio_path = Path(audio_path)
             
-            # Return URL or file path (in production, this would be a hosted URL)
-            # For now, return the local file path - Twilio can access local files in dev
-            logger.info(f"TTS generated successfully: {audio_path}")
-            return audio_path
+            # Return web-accessible URL for Twilio
+            audio_url = f"/static/audio/{audio_path.name}"
+            logger.info(f"TTS generated successfully: {audio_url}")
+            return audio_url
             
         except Exception as e:
             logger.error(f"Text-to-speech failed: {str(e)}")
@@ -280,14 +285,15 @@ class SpeechProcessor:
             # - Compress dynamic range
             # - Optimize file size while maintaining quality
             
-            optimized_path = audio_path.replace('.mp3', '_phone.mp3')
+            path_obj = Path(audio_path)
+            optimized_path = path_obj.with_stem(f"{path_obj.stem}_phone")
             
             # For now, just copy the file (placeholder for actual optimization)
             import shutil
             shutil.copy2(audio_path, optimized_path)
             
             logger.debug(f"Audio optimized for phone: {optimized_path}")
-            return optimized_path
+            return str(optimized_path)
             
         except Exception as e:
             logger.error(f"Audio optimization failed: {str(e)}")

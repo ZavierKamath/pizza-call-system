@@ -14,8 +14,8 @@ from fastapi import Request, Response, HTTPException, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from ..config.logging_config import get_logger
-from ..config.settings import settings
+from config.logging_config import get_logger
+from config.settings import settings
 
 # Configure logging
 logger = get_logger(__name__)

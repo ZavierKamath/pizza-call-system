@@ -15,12 +15,12 @@ import stripe
 from fastapi import Request, HTTPException, BackgroundTasks
 from stripe.error import StripeError
 
-from ..config.settings import settings
-from ..database.redis_client import get_redis_async
-from ..database.models import PaymentTransaction, Order, OrderStatus
-from ..database import get_db_session
-from ..payment.stripe_client import stripe_client
-from ..config.logging_config import get_logger
+from config.settings import settings
+from database.redis_client import get_redis_async
+from database.models import PaymentTransaction, Order, OrderStatus
+from database import get_db_session
+from payment.stripe_client import stripe_client
+from config.logging_config import get_logger
 
 # Configure logging
 logger = get_logger(__name__)

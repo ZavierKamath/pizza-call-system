@@ -10,11 +10,11 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from enum import Enum
 
-from ..database import get_db_session
-from ..database.models import PaymentTransaction, PaymentStatus, Order, OrderStatus
-from ..database.redis_client import get_redis_async
-from ..config.logging_config import get_logger
-from ..config.settings import settings
+from database import get_db_session
+from database.models import PaymentTransaction, PaymentStatus, Order, OrderStatus
+from database.redis_client import get_redis_async
+from config.logging_config import get_logger
+from config.settings import settings
 
 # Configure logging
 logger = get_logger(__name__)
@@ -539,7 +539,7 @@ class PaymentMonitor:
     async def _check_stripe_connectivity(self) -> Dict[str, Any]:
         """Check Stripe API connectivity."""
         try:
-            from ..payment.stripe_client import stripe_client
+            from payment.stripe_client import stripe_client
             
             # Simple API test
             test_result = await stripe_client._test_api_connection()

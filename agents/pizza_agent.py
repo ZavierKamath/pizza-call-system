@@ -20,16 +20,16 @@ from langchain_openai import ChatOpenAI
 # Local imports
 from .states import OrderState, StateManager, ValidationResult
 from .prompts import PromptManager
-from ..database import (
+from database import (
     create_session, update_session, get_session, 
     create_order, get_order, OrderManager
 )
-from ..validation import AddressValidator, OrderValidator, PaymentValidator
-from ..validation.error_formatter import format_validation_summary
-from ..payment.stripe_client import stripe_client, create_payment_intent, confirm_payment
-from ..payment.payment_method_manager import payment_method_manager
-from ..agents.delivery_estimator import DeliveryEstimator
-from ..config.logging_config import get_logger, log_session_operation
+from validation import AddressValidator, OrderValidator, PaymentValidator
+from validation.error_formatter import format_validation_summary
+from payment.stripe_client import stripe_client, create_payment_intent, confirm_payment
+from payment.payment_method_manager import payment_method_manager
+from agents.delivery_estimator import DeliveryEstimator
+from config.logging_config import get_logger, log_session_operation
 
 # Configure logging
 logger = get_logger(__name__)
@@ -56,7 +56,7 @@ class PizzaOrderingAgent:
         
         # Initialize LLM
         self.llm = ChatOpenAI(
-            model="gpt-4",
+            model="gpt-4o-mini",
             temperature=0.7,
             api_key=self.openai_api_key,
             max_tokens=500
@@ -92,18 +92,19 @@ class PizzaOrderingAgent:
             
             # Get current conversation state
             conversation_state = current_state.get("current_state", "greeting")
+            logger.info(f"Processing state: {conversation_state} for session {current_state.get('session_id')} with input: '{user_input[:50]}...'")
             
             # Process through appropriate handler based on state
             if conversation_state == "greeting":
-                response = await self._handle_greeting(current_state)
+                response = self._handle_greeting(current_state)
             elif conversation_state == "collect_name":
-                response = await self._handle_collect_name(current_state)
+                response = self._handle_collect_name(current_state)
             elif conversation_state == "collect_address":
                 response = await self._handle_collect_address(current_state)
             elif conversation_state == "collect_order":
-                response = await self._handle_collect_order(current_state)
+                response = self._handle_collect_order(current_state)
             elif conversation_state == "collect_payment_preference":
-                response = await self._handle_collect_payment_preference(current_state)
+                response = self._handle_collect_payment_preference(current_state)
             elif conversation_state == "validate_inputs":
                 response = await self._handle_validate_inputs(current_state)
             elif conversation_state == "process_payment":
@@ -111,11 +112,17 @@ class PizzaOrderingAgent:
             elif conversation_state == "estimate_delivery":
                 response = await self._handle_estimate_delivery(current_state)
             elif conversation_state == "generate_ticket":
-                response = await self._handle_generate_ticket(current_state)
+                response = self._handle_generate_ticket(current_state)
             elif conversation_state == "confirmation":
-                response = await self._handle_confirmation(current_state)
+                response = self._handle_confirmation(current_state)
             else:
-                response = await self._handle_error(current_state)
+                response = self._handle_error(current_state)
+            
+            # Apply state transition if needed
+            if "next_state" in response and response["next_state"]:
+                # Transition to next state
+                response["current_state"] = response["next_state"]
+                logger.info(f"State transition: {conversation_state} -> {response['current_state']}")
             
             # Extract message for voice response
             agent_message = response.get("agent_response", "I'm sorry, I didn't understand that.")
@@ -283,35 +290,50 @@ class PizzaOrderingAgent:
         logger.info(f"Processing greeting for session {state.get('session_id')}")
         
         try:
-            # Get system prompt for greeting
-            prompt = self.prompt_manager.get_prompt_for_state("greeting", state)
+            user_input = state.get("user_input", "Hello")
             
-            # Generate greeting response
-            messages = [
-                SystemMessage(content=prompt),
-                HumanMessage(content=state.get("user_input", "Hello"))
-            ]
+            # Check if user provided a name in their input
+            extracted_name = self._extract_name_from_input(user_input)
             
-            response = self.llm.invoke(messages)
-            
-            # Update state
-            updated_state = state.copy()
-            updated_state["agent_response"] = response.content
-            updated_state["current_state"] = "greeting"
-            updated_state["next_state"] = "collect_name"
+            if extracted_name and self._validate_name(extracted_name):
+                # User provided name - store it and move to address collection
+                updated_state = state.copy()
+                updated_state["customer_name"] = extracted_name
+                updated_state["agent_response"] = f"Thanks, {extracted_name}. What's your address?"
+                updated_state["current_state"] = "greeting"
+                updated_state["next_state"] = "collect_address"
+                logger.info(f"Name extracted from greeting: {extracted_name}")
+            else:
+                # No name provided - use AI to generate greeting response
+                prompt = self.prompt_manager.get_prompt_for_state("greeting", state)
+                
+                messages = [
+                    SystemMessage(content=prompt),
+                    HumanMessage(content=user_input)
+                ]
+                
+                response = self.llm.invoke(messages)
+                
+                updated_state = state.copy()
+                updated_state["agent_response"] = response.content
+                updated_state["current_state"] = "greeting"
+                updated_state["next_state"] = "collect_name"
             
             # Update conversation history
+            user_input = state.get("user_input", "Hello")
+            agent_response = updated_state.get("agent_response", "")
+            
             updated_state = self.state_manager.update_conversation_history(
-                updated_state, "user", state.get("user_input", "Hello")
+                updated_state, "user", user_input
             )
             updated_state = self.state_manager.update_conversation_history(
-                updated_state, "assistant", response.content
+                updated_state, "assistant", agent_response
             )
             
             log_session_operation(
                 "greeting_processed", 
                 state.get("session_id", "unknown"),
-                {"response_length": len(response.content)}
+                {"response_length": len(agent_response)}
             )
             
             return updated_state
@@ -1134,8 +1156,8 @@ class PizzaOrderingAgent:
     async def _store_delivery_estimate_in_db(self, order_id: int, estimate: Any):
         """Store delivery estimate in database for tracking and analysis."""
         try:
-            from ..database.models import DeliveryEstimateRecord
-            from ..database import get_db_session
+            from database.models import DeliveryEstimateRecord
+            from database import get_db_session
             
             async with get_db_session() as session:
                 # Deactivate previous estimates for this order

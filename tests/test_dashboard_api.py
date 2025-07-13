@@ -14,11 +14,11 @@ from fastapi import FastAPI
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from ..main import app
-from ..database.models import Base, Order, OrderStatus, PaymentStatus
-from ..database import get_db_session
-from ..api.auth import auth_manager, UserRole
-from ..api.websocket import websocket_manager
+from main import app
+from database.models import Base, Order, OrderStatus, PaymentStatus
+from database import get_db_session
+from api.auth import auth_manager, UserRole
+from api.websocket import websocket_manager
 
 
 # Test database setup

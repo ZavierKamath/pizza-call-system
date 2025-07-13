@@ -14,13 +14,13 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
 
-from ..database import get_db_session
-from ..database.models import (
+from database import get_db_session
+from database.models import (
     Order, OrderStatus, PaymentStatus, ActiveSession, 
     DeliveryEstimateRecord, PaymentTransaction
 )
-from ..config.logging_config import get_logger
-from ..config.settings import settings
+from config.logging_config import get_logger
+from config.settings import settings
 
 # Configure logging
 logger = get_logger(__name__)
@@ -622,7 +622,7 @@ async def update_pending_delivery_estimates(completed_order_id: int):
     """
     try:
         # Import here to avoid circular imports
-        from ..agents.delivery_estimator import delivery_estimator
+        from agents.delivery_estimator import delivery_estimator
         
         logger.info(f"Updating delivery estimates after order {completed_order_id} completion")
         
@@ -639,7 +639,7 @@ async def send_completion_notification(order_data: Dict[str, Any]):
     """
     try:
         # Import WebSocket manager here to avoid circular imports
-        from .websocket import websocket_manager
+        from websocket import websocket_manager
         
         logger.info(f"Sending completion notification for order {order_data['id']}")
         

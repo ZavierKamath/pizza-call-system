@@ -11,11 +11,11 @@ from typing import Dict, List, Optional, Set, Any, Union
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 
-from ..database.redis_client import get_redis_async
-from ..database.models import ActiveSession
-from ..database.connection import get_db_session
-from ..config.settings import settings
-from ..agents.states import OrderState, StateManager
+from database.redis_client import get_redis_async
+from database.models import ActiveSession
+from database.connection import db_manager
+from config.settings import settings
+from agents.states import OrderState, StateManager
 
 # Configure logging for session management
 logger = logging.getLogger(__name__)
@@ -418,7 +418,7 @@ class SessionManager:
             session_info: Session information to store
         """
         try:
-            with get_db_session() as db_session:
+            with db_manager.get_session() as db_session:
                 # Create ActiveSession database record
                 active_session = ActiveSession(
                 session_id=session_info.session_id,
@@ -446,7 +446,7 @@ class SessionManager:
             session_id: Session identifier
         """
         try:
-            with get_db_session() as db_session:
+            with db_manager.get_session() as db_session:
                 # Remove from active sessions table
                 active_session = db_session.query(ActiveSession).filter(
                     ActiveSession.session_id == session_id

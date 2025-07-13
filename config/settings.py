@@ -210,7 +210,7 @@ class Settings(BaseSettings):
     # =============================================================================
     
     model_config = {
-        "env_file": ".env",  # Load from .env file if present
+        "env_file": ".env",  # Load from env file if present
         "env_file_encoding": "utf-8",
         "case_sensitive": False,  # Allow case-insensitive environment variables
         "extra": "ignore",  # Ignore extra environment variables

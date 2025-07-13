@@ -13,8 +13,8 @@ from enum import Enum
 from fastapi import WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from ..config.logging_config import get_logger
-from ..config.settings import settings
+from config.logging_config import get_logger
+from config.settings import settings
 
 # Configure logging
 logger = get_logger(__name__)

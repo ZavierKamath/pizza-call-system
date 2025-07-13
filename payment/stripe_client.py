@@ -17,10 +17,10 @@ from stripe.error import (
     APIConnectionError, APIError, RateLimitError
 )
 
-from ..config.settings import settings
-from ..database.redis_client import get_redis_async
-from ..database.models import PaymentTransaction, PaymentStatus
-from ..database import get_db_session
+from config.settings import settings
+from database.redis_client import get_redis_async
+from database.models import PaymentTransaction, PaymentStatus
+from database import get_db_session
 
 # Configure logging
 logger = logging.getLogger(__name__)

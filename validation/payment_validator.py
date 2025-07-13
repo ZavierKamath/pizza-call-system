@@ -14,8 +14,8 @@ import uuid
 import stripe
 from stripe.error import StripeError, CardError, InvalidRequestError
 
-from ..config.settings import settings
-from ..database.redis_client import get_redis_async
+from config.settings import settings
+from database.redis_client import get_redis_async
 
 # Configure logging
 logger = logging.getLogger(__name__)

@@ -3,10 +3,12 @@ Pizza Agent - Voice-activated AI pizza ordering system
 Main FastAPI application entry point
 """
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from typing import Optional, Dict, Any
 import uvicorn
 
@@ -31,6 +33,11 @@ async def lifespan(app: FastAPI):
     logger.info(f"Environment: {settings.environment}")
     logger.info(f"Redis URL: {settings.redis_url}")
     logger.info(f"Max concurrent calls: {settings.max_concurrent_calls}")
+    
+    # Create audio directory for TTS files
+    audio_dir = "static/audio"
+    os.makedirs(audio_dir, exist_ok=True)
+    logger.info(f"Audio directory created: {audio_dir}")
     
     # Initialize database connection (will be implemented in database module)
     # await init_database()
@@ -352,6 +359,9 @@ app.include_router(metrics_router, prefix="/api", tags=["metrics"])
 
 # Add middleware for rate limiting and error handling
 from api.middleware import RateLimitMiddleware, ErrorHandlingMiddleware, RequestLoggingMiddleware
+
+# Mount static files for TTS audio
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Add middleware in reverse order (last added = first executed)
 app.add_middleware(RequestLoggingMiddleware)
