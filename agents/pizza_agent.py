@@ -6,9 +6,9 @@ Implements state-based conversation management with OpenAI integration.
 import os
 import logging
 import asyncio
+import re
 from typing import Any, Dict, List, Optional, Union, Literal
 from datetime import datetime
-import re
 import uuid
 
 # LangGraph and LangChain imports
@@ -292,8 +292,15 @@ class PizzaOrderingAgent:
         try:
             user_input = state.get("user_input", "Hello")
             
-            # Check if user provided a name in their input
-            extracted_name = self._extract_name_from_input(user_input)
+            # Smart extraction: Try to extract both name and address from input
+            extracted_name = await self._extract_name_from_input(user_input)
+            
+            # Also check if they gave an address along with the name
+            address_data = await self._extract_address_from_input(user_input, state)
+            if address_data and address_data.get("street"):
+                logger.info(f"User provided both name and address: name={extracted_name}, address={address_data}")
+                # Store the address info for later use
+                state["detected_address"] = address_data
             
             if extracted_name and self._validate_name(extracted_name):
                 # User provided name - store it and move to address collection
@@ -352,7 +359,7 @@ class PizzaOrderingAgent:
             )
             
             # Extract name from user input
-            extracted_name = self._extract_name_from_input(user_input)
+            extracted_name = await self._extract_name_from_input(user_input)
             
             # Get appropriate prompt
             prompt = self.prompt_manager.get_prompt_for_state("collect_name", state)
@@ -404,15 +411,17 @@ class PizzaOrderingAgent:
                 state.get("user_input", "")
             )
             
-            # Check if user is giving pizza order instead of address
-            # Look for pizza-related keywords to detect order attempts
-            pizza_keywords = ["pizza", "pepperoni", "cheese", "large", "medium", "small", "order", "get", "want", "have", "all"]
-            if any(keyword.lower() in user_input.lower() for keyword in pizza_keywords):
-                logger.info(f"Detected pizza order input: '{user_input}'")
-                # If we have ANY address info (even partial), transition to order collection
+            # Smart detection: Check if user is giving pizza order instead of/along with address
+            from .extractors import extract_pizza_order
+            
+            pizza_result = await extract_pizza_order(user_input, self.openai_api_key)
+            if pizza_result.success and pizza_result.confidence > 0.7:
+                logger.info(f"Detected pizza order in address input: {pizza_result.data}")
+                
+                # If we have ANY address info (current or previous), transition to order collection
                 existing_address = state.get("address", {})
-                if existing_address or "address" in state:
-                    logger.info(f"Transitioning to collect_order state - have address info: {existing_address}")
+                if existing_address and existing_address.get("street"):
+                    logger.info(f"Have existing address {existing_address}, transitioning to collect_order with pizza: {pizza_result.data}")
                     updated_state = state.copy()
                     updated_state["agent_response"] = "Got it! Let me take your pizza order."
                     updated_state["current_state"] = "collect_address"
@@ -430,7 +439,15 @@ class PizzaOrderingAgent:
                     return updated_state
             
             # Extract address components from input
-            address_data = self._extract_address_from_input(user_input, state)
+            address_data = await self._extract_address_from_input(user_input, state)
+            
+            # Check if we have pre-detected address from earlier state
+            if not address_data and state.get("detected_address"):
+                logger.info(f"Using pre-detected address from earlier: {state['detected_address']}")
+                address_data = state["detected_address"]
+                # Clear it so we don't reuse it
+                state.pop("detected_address", None)
+            
             logger.info(f"Address extraction result: {address_data}")
             logger.info(f"User input for address: '{user_input}'")
             
@@ -510,7 +527,7 @@ class PizzaOrderingAgent:
             )
             
             # Extract pizza order from input
-            pizza_order = self._extract_pizza_order_from_input(user_input, state)
+            pizza_order = await self._extract_pizza_order_from_input(user_input, state)
             
             # Get appropriate prompt with menu context
             context = {**state, "available_menu": self.state_manager._get_default_menu()}
@@ -573,7 +590,7 @@ class PizzaOrderingAgent:
             )
             
             # Extract payment preference
-            payment_method = self._extract_payment_method_from_input(user_input)
+            payment_method = await self._extract_payment_method_from_input(user_input)
             
             # Get appropriate prompt
             prompt = self.prompt_manager.get_prompt_for_state("collect_payment_preference", state)
@@ -1032,29 +1049,24 @@ class PizzaOrderingAgent:
     
     # Input extraction and validation helpers
     
-    def _extract_name_from_input(self, user_input: str) -> Optional[str]:
-        """Extract customer name from user input."""
-        # Simple name extraction - look for name patterns
-        name_patterns = [
-            r"my name is (\w+ \w+)",
-            r"i'm (\w+ \w+)",
-            r"this is (\w+ \w+)",
-            r"(\w+ \w+)"  # Fallback - any two words
-        ]
+    async def _extract_name_from_input(self, user_input: str) -> Optional[str]:
+        """Extract customer name from user input using LLM."""
+        from .extractors import extract_name
         
-        for pattern in name_patterns:
-            match = re.search(pattern, user_input.lower())
-            if match:
-                name = match.group(1).title()
-                if len(name.split()) >= 1:  # At least one word
-                    return name
-        
-        # If input looks like just a name
-        words = user_input.strip().split()
-        if 1 <= len(words) <= 3 and all(word.isalpha() for word in words):
-            return " ".join(word.title() for word in words)
-        
-        return None
+        try:
+            extraction_result = await extract_name(user_input, self.openai_api_key)
+            
+            if extraction_result.success:
+                name = extraction_result.data.get("name")
+                logger.info(f"LLM name extraction successful: {name}")
+                return name
+            else:
+                logger.info(f"LLM name extraction failed: confidence={extraction_result.confidence}, errors={extraction_result.errors}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error in LLM name extraction: {e}")
+            return None
     
     def _validate_name(self, name: str) -> bool:
         """Validate if name is reasonable."""
@@ -1067,37 +1079,23 @@ class PizzaOrderingAgent:
         
         return True
     
-    def _extract_address_from_input(self, user_input: str, state: OrderState) -> Optional[Dict[str, Any]]:
-        """Extract address components from user input - simplified for demo."""
-        address_data = {}
+    async def _extract_address_from_input(self, user_input: str, state: OrderState) -> Optional[Dict[str, Any]]:
+        """Extract address components from user input using LLM."""
+        from .extractors import extract_address
         
-        # Simplified extraction - focus on street address only
-        # Look for common street address patterns
-        street_patterns = [
-            r"(\d+\s+[a-zA-Z\s]+(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|way|court|ct|place|pl|circle|cir))",
-            r"(\d+\s+[a-zA-Z\s]+)",  # Fallback: number + letters
-        ]
-        
-        for pattern in street_patterns:
-            street_match = re.search(pattern, user_input, re.IGNORECASE)
-            if street_match:
-                street_text = street_match.group(1).strip()
-                # Clean up the street text
-                if len(street_text) >= 3:
-                    address_data["street"] = street_text
-                    break
-        
-        # If no pattern match, try to extract just numbers + words
-        if not address_data.get("street"):
-            # Look for any number followed by words (more flexible)
-            simple_pattern = r"(\d+[a-zA-Z\s,.-]+)"
-            simple_match = re.search(simple_pattern, user_input)
-            if simple_match:
-                potential_street = simple_match.group(1).strip().rstrip(".,")
-                if len(potential_street) >= 3:
-                    address_data["street"] = potential_street
-        
-        return address_data if address_data else None
+        try:
+            extraction_result = await extract_address(user_input, self.openai_api_key)
+            
+            if extraction_result.success:
+                logger.info(f"LLM address extraction successful: {extraction_result.data}")
+                return extraction_result.data
+            else:
+                logger.info(f"LLM address extraction failed: confidence={extraction_result.confidence}, errors={extraction_result.errors}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error in LLM address extraction: {e}")
+            return None
     
     def _is_address_complete(self, address_data: Dict[str, Any]) -> bool:
         """Check if address has minimum required components for demo (street only)."""
@@ -1217,66 +1215,53 @@ class PizzaOrderingAgent:
             logger.warning(f"Error storing delivery estimate in database: {e}")
             # Don't fail the whole process if database storage fails
     
-    def _extract_pizza_order_from_input(self, user_input: str, state: OrderState) -> Optional[Dict[str, Any]]:
-        """Extract pizza order details from user input."""
-        pizza_order = {}
-        input_lower = user_input.lower()
+    async def _extract_pizza_order_from_input(self, user_input: str, state: OrderState) -> Optional[Dict[str, Any]]:
+        """Extract pizza order details from user input using LLM."""
+        from .extractors import extract_pizza_order
         
-        # Extract size
-        size_patterns = {
-            "small": ["small", "10", "10 inch", "personal"],
-            "medium": ["medium", "12", "12 inch", "regular"],
-            "large": ["large", "14", "14 inch", "big", "family"]
-        }
-        
-        for size, patterns in size_patterns.items():
-            if any(pattern in input_lower for pattern in patterns):
-                pizza_order["size"] = size
-                break
-        
-        # Extract crust
-        if "thin" in input_lower:
-            pizza_order["crust"] = "thin"
-        elif "thick" in input_lower:
-            pizza_order["crust"] = "thick"
-        elif "stuffed" in input_lower:
-            pizza_order["crust"] = "stuffed"
-        else:
-            pizza_order["crust"] = "thin"  # Default
-        
-        # Extract toppings
-        menu = self.state_manager._get_default_menu()
-        toppings = []
-        
-        for topping in menu["toppings"].keys():
-            if topping in input_lower or topping.replace("_", " ") in input_lower:
-                toppings.append(topping)
-        
-        pizza_order["toppings"] = toppings
-        pizza_order["quantity"] = 1  # Default
-        
-        # Calculate price
-        if "size" in pizza_order:
-            base_price = menu["sizes"][pizza_order["size"]]["price"]
-            topping_price = sum(menu["toppings"][t] for t in toppings)
-            crust_price = 2.0 if pizza_order.get("crust") == "stuffed" else 0.0
+        try:
+            extraction_result = await extract_pizza_order(user_input, self.openai_api_key)
             
-            pizza_order["price"] = base_price + topping_price + crust_price
-        
-        return pizza_order if "size" in pizza_order else None
+            if extraction_result.success:
+                pizza_data = extraction_result.data
+                
+                # Calculate price using menu
+                menu = self.state_manager._get_default_menu()
+                if pizza_data.get("size"):
+                    base_price = menu["sizes"][pizza_data["size"]]["price"]
+                    topping_price = sum(menu["toppings"].get(t, 0) for t in pizza_data.get("toppings", []))
+                    crust_price = 2.0 if pizza_data.get("crust") == "stuffed" else 0.0
+                    
+                    pizza_data["price"] = base_price + topping_price + crust_price
+                
+                logger.info(f"LLM pizza extraction successful: {pizza_data}")
+                return pizza_data
+            else:
+                logger.info(f"LLM pizza extraction failed: confidence={extraction_result.confidence}, errors={extraction_result.errors}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error in LLM pizza extraction: {e}")
+            return None
     
-    def _extract_payment_method_from_input(self, user_input: str) -> Optional[str]:
-        """Extract payment method from user input."""
-        input_lower = user_input.lower()
+    async def _extract_payment_method_from_input(self, user_input: str) -> Optional[str]:
+        """Extract payment method from user input using LLM."""
+        from .extractors import extract_payment
         
-        if any(word in input_lower for word in ["credit", "card", "visa", "mastercard", "amex"]):
-            return "credit_card"
-        elif any(word in input_lower for word in ["debit"]):
-            return "debit_card"
-        elif any(word in input_lower for word in ["cash", "money"]):
-            return "cash"
-        
-        return None
+        try:
+            extraction_result = await extract_payment(user_input, self.openai_api_key)
+            
+            if extraction_result.success:
+                payment_method = extraction_result.data.get("payment_method")
+                logger.info(f"LLM payment extraction successful: {payment_method}")
+                return payment_method
+            else:
+                logger.info(f"LLM payment extraction failed: confidence={extraction_result.confidence}, errors={extraction_result.errors}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error in LLM payment extraction: {e}")
+            return None
     
     def _user_wants_more_items(self, user_input: str) -> bool:
         """Determine if user wants to add more items."""
